@@ -537,16 +537,44 @@ class HallmarkAuthenticator:
             page: Playwright page object
 
         Returns:
-            bool: True if Aura framework is available with getToken
+            bool: True if Aura framework is available (with or without getToken)
         """
         try:
-            return page.evaluate("""
+            result = page.evaluate("""
                 () => {
-                    return typeof window.$A !== 'undefined' &&
-                           typeof window.$A.getToken === 'function';
+                    try {
+                        // Check for $A existence
+                        if (typeof window.$A !== 'undefined' && window.$A !== null) {
+                            return {
+                                available: true,
+                                hasGetToken: typeof window.$A.getToken === 'function',
+                                hasGetContext: typeof window.$A.getContext === 'function',
+                                type: typeof window.$A
+                            };
+                        }
+                        // Check for Aura existence as fallback
+                        if (typeof window.Aura !== 'undefined' && window.Aura !== null) {
+                            return {
+                                available: true,
+                                hasGetToken: false,
+                                hasGetContext: false,
+                                type: 'Aura object'
+                            };
+                        }
+                        return { available: false };
+                    } catch (e) {
+                        return { available: false, error: e.message };
+                    }
                 }
             """)
-        except Exception:
+
+            if result.get('available'):
+                logger.debug(f"  Aura available: hasGetToken={result.get('hasGetToken')}, hasGetContext={result.get('hasGetContext')}")
+                return True
+            return False
+
+        except Exception as e:
+            logger.debug(f"  Error checking Aura availability: {e}")
             return False
 
     def _wait_for_aura(self, page: Page, timeout: int = 10000) -> bool:
@@ -708,7 +736,7 @@ class HallmarkAuthenticator:
         return None
 
     def _extract_tokens_js(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract tokens using JavaScript execution.
+        """Extract tokens using JavaScript execution with multiple safe methods.
 
         Args:
             page: Playwright page object
@@ -716,33 +744,473 @@ class HallmarkAuthenticator:
         Returns:
             Dict with token, context, and fwuid, or None if extraction fails
         """
+        # First, log what Aura properties are available for debugging
+        self._log_aura_properties(page)
+
+        # Try multiple extraction methods in order of preference
+        methods = [
+            ("$A.getToken()", self._extract_via_getToken),
+            ("$A.getContext().getToken()", self._extract_via_context_getToken),
+            ("Aura.token property", self._extract_via_aura_token_property),
+            ("Window Aura object", self._extract_via_window_aura),
+            ("$A.storageService", self._extract_via_storage_service),
+        ]
+
+        for method_name, method_func in methods:
+            try:
+                logger.info(f"  Trying Aura extraction method: {method_name}")
+                result = method_func(page)
+                if result and result.get("token"):
+                    logger.info(f"  ✓ Successfully extracted tokens via: {method_name}")
+                    return result
+                else:
+                    logger.debug(f"  Method {method_name} returned no token")
+            except Exception as e:
+                logger.debug(f"  Method {method_name} failed: {e}")
+
+        logger.warning("All JavaScript Aura extraction methods failed")
+        return None
+
+    def _log_aura_properties(self, page: Page) -> None:
+        """Log available Aura framework properties for debugging.
+
+        Args:
+            page: Playwright page object
+        """
         try:
             result = page.evaluate("""
                 () => {
-                    if (window.$A && window.$A.getToken) {
-                        return {
-                            token: window.$A.getToken(),
-                            context: window.$A.getContext() ?
-                                window.$A.getContext().encodeForServer() : null,
-                            fwuid: window.$A.getContext() ?
-                                window.$A.getContext().fwuid : null
-                        };
+                    const info = {
+                        hasWindow$A: typeof window.$A !== 'undefined',
+                        hasWindowAura: typeof window.Aura !== 'undefined',
+                        $A_type: typeof window.$A,
+                        $A_keys: [],
+                        $A_methods: [],
+                        context_keys: [],
+                        context_methods: [],
+                        errors: []
+                    };
+
+                    try {
+                        // Get $A properties
+                        if (window.$A) {
+                            for (const key in window.$A) {
+                                try {
+                                    const type = typeof window.$A[key];
+                                    if (type === 'function') {
+                                        info.$A_methods.push(key);
+                                    } else {
+                                        info.$A_keys.push(key + ':' + type);
+                                    }
+                                } catch (e) {
+                                    info.errors.push('$A.' + key + ': ' + e.message);
+                                }
+                            }
+
+                            // Check specific important methods
+                            info.hasGetToken = typeof window.$A.getToken === 'function';
+                            info.hasGetContext = typeof window.$A.getContext === 'function';
+                            info.hasGet = typeof window.$A.get === 'function';
+
+                            // Try to get context info
+                            if (typeof window.$A.getContext === 'function') {
+                                try {
+                                    const ctx = window.$A.getContext();
+                                    if (ctx) {
+                                        info.contextExists = true;
+                                        for (const key in ctx) {
+                                            try {
+                                                const type = typeof ctx[key];
+                                                if (type === 'function') {
+                                                    info.context_methods.push(key);
+                                                } else {
+                                                    info.context_keys.push(key + ':' + type);
+                                                }
+                                            } catch (e) {
+                                                info.errors.push('context.' + key + ': ' + e.message);
+                                            }
+                                        }
+                                        // Check for specific context properties
+                                        info.context_hasFwuid = 'fwuid' in ctx;
+                                        info.context_hasToken = 'token' in ctx;
+                                        info.context_hasGetToken = typeof ctx.getToken === 'function';
+                                        info.context_hasEncodeForServer = typeof ctx.encodeForServer === 'function';
+                                    }
+                                } catch (e) {
+                                    info.errors.push('getContext(): ' + e.message);
+                                }
+                            }
+                        }
+
+                        // Check window.Aura
+                        if (window.Aura) {
+                            info.Aura_keys = Object.keys(window.Aura).slice(0, 20);
+                        }
+
+                    } catch (e) {
+                        info.errors.push('Main loop: ' + e.message);
                     }
-                    return null;
+
+                    return info;
                 }
             """)
 
-            if result and result.get("token"):
-                logger.debug("Successfully extracted tokens via JavaScript")
-                return {
-                    "token": result["token"],
-                    "context": result.get("context", ""),
-                    "fwuid": result.get("fwuid", "")
-                }
+            logger.info("  === Aura Framework Properties ===")
+            logger.info(f"    window.$A exists: {result.get('hasWindow$A')}")
+            logger.info(f"    window.Aura exists: {result.get('hasWindowAura')}")
+            logger.info(f"    $A type: {result.get('$A_type')}")
+
+            if result.get('$A_methods'):
+                logger.info(f"    $A methods: {', '.join(result['$A_methods'][:15])}")
+            if result.get('$A_keys'):
+                logger.info(f"    $A properties: {', '.join(result['$A_keys'][:10])}")
+
+            logger.info(f"    $A.getToken exists: {result.get('hasGetToken')}")
+            logger.info(f"    $A.getContext exists: {result.get('hasGetContext')}")
+            logger.info(f"    $A.get exists: {result.get('hasGet')}")
+
+            if result.get('contextExists'):
+                logger.info(f"    Context exists: True")
+                logger.info(f"    Context.fwuid exists: {result.get('context_hasFwuid')}")
+                logger.info(f"    Context.token exists: {result.get('context_hasToken')}")
+                logger.info(f"    Context.getToken exists: {result.get('context_hasGetToken')}")
+                logger.info(f"    Context.encodeForServer exists: {result.get('context_hasEncodeForServer')}")
+                if result.get('context_methods'):
+                    logger.info(f"    Context methods: {', '.join(result['context_methods'][:10])}")
+
+            if result.get('Aura_keys'):
+                logger.info(f"    window.Aura keys: {', '.join(result['Aura_keys'][:10])}")
+
+            if result.get('errors'):
+                logger.warning(f"    Errors during inspection: {result['errors']}")
+
+            logger.info("  === End Aura Properties ===")
 
         except Exception as e:
-            logger.warning(f"JavaScript token extraction failed: {e}")
+            logger.warning(f"  Error logging Aura properties: {e}")
 
+    def _extract_via_getToken(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract token using $A.getToken() method.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens or None
+        """
+        result = page.evaluate("""
+            () => {
+                try {
+                    if (!window.$A) {
+                        return { error: '$A not defined' };
+                    }
+                    if (typeof window.$A.getToken !== 'function') {
+                        return { error: '$A.getToken is not a function' };
+                    }
+
+                    const token = window.$A.getToken();
+                    if (!token) {
+                        return { error: '$A.getToken() returned null/undefined' };
+                    }
+
+                    let context = null;
+                    let fwuid = null;
+
+                    // Try to get context
+                    if (typeof window.$A.getContext === 'function') {
+                        try {
+                            const ctx = window.$A.getContext();
+                            if (ctx) {
+                                // Try encodeForServer
+                                if (typeof ctx.encodeForServer === 'function') {
+                                    try {
+                                        context = ctx.encodeForServer();
+                                    } catch (e) {
+                                        // Try JSON.stringify as fallback
+                                        try {
+                                            context = JSON.stringify(ctx);
+                                        } catch (e2) {}
+                                    }
+                                }
+                                // Get fwuid
+                                if (ctx.fwuid) {
+                                    fwuid = ctx.fwuid;
+                                }
+                            }
+                        } catch (e) {
+                            // Context extraction failed, but we have token
+                        }
+                    }
+
+                    return {
+                        token: token,
+                        context: context,
+                        fwuid: fwuid
+                    };
+                } catch (e) {
+                    return { error: e.message || String(e) };
+                }
+            }
+        """)
+
+        if result and result.get("error"):
+            logger.debug(f"  _extract_via_getToken error: {result['error']}")
+            return None
+
+        if result and result.get("token"):
+            return {
+                "token": result["token"],
+                "context": result.get("context") or "",
+                "fwuid": result.get("fwuid") or ""
+            }
+        return None
+
+    def _extract_via_context_getToken(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract token using $A.getContext().getToken() method.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens or None
+        """
+        result = page.evaluate("""
+            () => {
+                try {
+                    if (!window.$A) {
+                        return { error: '$A not defined' };
+                    }
+                    if (typeof window.$A.getContext !== 'function') {
+                        return { error: '$A.getContext is not a function' };
+                    }
+
+                    const ctx = window.$A.getContext();
+                    if (!ctx) {
+                        return { error: 'getContext() returned null' };
+                    }
+
+                    let token = null;
+
+                    // Try getToken method on context
+                    if (typeof ctx.getToken === 'function') {
+                        token = ctx.getToken();
+                    }
+
+                    // Try token property
+                    if (!token && ctx.token) {
+                        token = ctx.token;
+                    }
+
+                    if (!token) {
+                        return { error: 'No token found on context' };
+                    }
+
+                    let context = null;
+                    let fwuid = ctx.fwuid || null;
+
+                    // Try to encode context
+                    if (typeof ctx.encodeForServer === 'function') {
+                        try {
+                            context = ctx.encodeForServer();
+                        } catch (e) {}
+                    }
+
+                    return {
+                        token: token,
+                        context: context,
+                        fwuid: fwuid
+                    };
+                } catch (e) {
+                    return { error: e.message || String(e) };
+                }
+            }
+        """)
+
+        if result and result.get("error"):
+            logger.debug(f"  _extract_via_context_getToken error: {result['error']}")
+            return None
+
+        if result and result.get("token"):
+            return {
+                "token": result["token"],
+                "context": result.get("context") or "",
+                "fwuid": result.get("fwuid") or ""
+            }
+        return None
+
+    def _extract_via_aura_token_property(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract token from Aura object properties.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens or None
+        """
+        result = page.evaluate("""
+            () => {
+                try {
+                    let token = null;
+                    let fwuid = null;
+                    let context = null;
+
+                    // Check window.Aura
+                    if (window.Aura) {
+                        if (window.Aura.token) token = window.Aura.token;
+                        if (window.Aura.fwuid) fwuid = window.Aura.fwuid;
+                        if (window.Aura.context) {
+                            try {
+                                context = JSON.stringify(window.Aura.context);
+                            } catch (e) {}
+                        }
+                    }
+
+                    // Check $A properties directly
+                    if (!token && window.$A) {
+                        if (window.$A.token) token = window.$A.token;
+                        if (window.$A.fwuid) fwuid = window.$A.fwuid;
+                    }
+
+                    if (!token) {
+                        return { error: 'No token property found' };
+                    }
+
+                    return {
+                        token: token,
+                        context: context,
+                        fwuid: fwuid
+                    };
+                } catch (e) {
+                    return { error: e.message || String(e) };
+                }
+            }
+        """)
+
+        if result and result.get("error"):
+            logger.debug(f"  _extract_via_aura_token_property error: {result['error']}")
+            return None
+
+        if result and result.get("token"):
+            return {
+                "token": result["token"],
+                "context": result.get("context") or "",
+                "fwuid": result.get("fwuid") or ""
+            }
+        return None
+
+    def _extract_via_window_aura(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract token from various window-level Aura objects.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens or None
+        """
+        result = page.evaluate("""
+            () => {
+                try {
+                    // Search for token in various places
+                    const locations = [
+                        () => window.$A && window.$A.clientService && window.$A.clientService.token,
+                        () => window.$A && window.$A.services && window.$A.services.client && window.$A.services.client.token,
+                        () => window.aura && window.aura.token,
+                        () => window.Aura && window.Aura.initConfig && window.Aura.initConfig.token,
+                    ];
+
+                    for (const loc of locations) {
+                        try {
+                            const token = loc();
+                            if (token && typeof token === 'string') {
+                                return { token: token, context: null, fwuid: null };
+                            }
+                        } catch (e) {}
+                    }
+
+                    return { error: 'No token found in window Aura objects' };
+                } catch (e) {
+                    return { error: e.message || String(e) };
+                }
+            }
+        """)
+
+        if result and result.get("error"):
+            logger.debug(f"  _extract_via_window_aura error: {result['error']}")
+            return None
+
+        if result and result.get("token"):
+            return {
+                "token": result["token"],
+                "context": result.get("context") or "",
+                "fwuid": result.get("fwuid") or ""
+            }
+        return None
+
+    def _extract_via_storage_service(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract token from Aura storage service.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens or None
+        """
+        result = page.evaluate("""
+            () => {
+                try {
+                    if (!window.$A) {
+                        return { error: '$A not defined' };
+                    }
+
+                    // Try $A.get("$Storage")
+                    if (typeof window.$A.get === 'function') {
+                        try {
+                            const storage = window.$A.get("$Storage");
+                            if (storage) {
+                                // Look for token-related keys
+                                const keys = Object.keys(storage);
+                                for (const key of keys) {
+                                    if (key.toLowerCase().includes('token')) {
+                                        const value = storage[key];
+                                        if (value && typeof value === 'string') {
+                                            return { token: value, context: null, fwuid: null };
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                    }
+
+                    // Try storageService
+                    if (window.$A.storageService) {
+                        try {
+                            const svc = window.$A.storageService;
+                            if (svc.getStorage) {
+                                const storage = svc.getStorage('actions');
+                                if (storage && storage.token) {
+                                    return { token: storage.token, context: null, fwuid: null };
+                                }
+                            }
+                        } catch (e) {}
+                    }
+
+                    return { error: 'No token found in storage service' };
+                } catch (e) {
+                    return { error: e.message || String(e) };
+                }
+            }
+        """)
+
+        if result and result.get("error"):
+            logger.debug(f"  _extract_via_storage_service error: {result['error']}")
+            return None
+
+        if result and result.get("token"):
+            return {
+                "token": result["token"],
+                "context": result.get("context") or "",
+                "fwuid": result.get("fwuid") or ""
+            }
         return None
 
     def _extract_tokens_regex(self, page: Page) -> Optional[Dict[str, str]]:
@@ -756,17 +1224,76 @@ class HallmarkAuthenticator:
         """
         try:
             content = page.content()
+            logger.info("  Attempting regex extraction from page source...")
 
-            token_match = re.search(self.TOKEN_PATTERN, content)
-            fwuid_match = re.search(self.FWUID_PATTERN, content)
+            # Multiple token patterns to try
+            token_patterns = [
+                # Standard aura.token pattern
+                (r'"aura\.token"\s*:\s*"([^"]+)"', "aura.token JSON"),
+                # Token in inline script
+                (r'aura\.token\s*=\s*["\']([^"\']+)["\']', "aura.token assignment"),
+                # Token in config object
+                (r'"token"\s*:\s*"([^"]+)"', "token JSON property"),
+                # Salesforce session ID pattern
+                (r'sid=([a-zA-Z0-9!]+)', "sid URL param"),
+                # CSRF token pattern
+                (r'"csrfToken"\s*:\s*"([^"]+)"', "csrfToken"),
+                # Lightning context token
+                (r'"TOKEN"\s*:\s*"([^"]+)"', "TOKEN property"),
+                # Aura config patterns
+                (r'Aura\.initConfig\s*=\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "Aura.initConfig token"),
+            ]
 
-            if token_match:
-                logger.debug("Successfully extracted tokens via regex")
+            # Multiple fwuid patterns to try
+            fwuid_patterns = [
+                (r'"fwuid"\s*:\s*"([^"]+)"', "fwuid JSON"),
+                (r'fwuid\s*=\s*["\']([^"\']+)["\']', "fwuid assignment"),
+                (r'"FWUID"\s*:\s*"([^"]+)"', "FWUID property"),
+            ]
+
+            # Multiple context patterns
+            context_patterns = [
+                (r'"aura\.context"\s*:\s*(\{[^}]+\})', "aura.context JSON"),
+                (r'aura\.context\s*=\s*(\{[^}]+\})', "aura.context assignment"),
+            ]
+
+            token = None
+            fwuid = None
+            context = None
+
+            # Try each token pattern
+            for pattern, name in token_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    token = match.group(1)
+                    logger.info(f"    Found token via pattern '{name}': {token[:50]}...")
+                    break
+
+            # Try each fwuid pattern
+            for pattern, name in fwuid_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    fwuid = match.group(1)
+                    logger.info(f"    Found fwuid via pattern '{name}': {fwuid}")
+                    break
+
+            # Try each context pattern
+            for pattern, name in context_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    context = match.group(1)
+                    logger.info(f"    Found context via pattern '{name}'")
+                    break
+
+            if token:
+                logger.info("  ✓ Successfully extracted tokens via regex")
                 return {
-                    "token": token_match.group(1),
-                    "context": "",  # Context harder to extract via regex
-                    "fwuid": fwuid_match.group(1) if fwuid_match else ""
+                    "token": token,
+                    "context": context or "",
+                    "fwuid": fwuid or ""
                 }
+
+            logger.debug("  No token found via regex patterns")
 
         except Exception as e:
             logger.error(f"Regex token extraction failed: {e}")
