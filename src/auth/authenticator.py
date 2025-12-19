@@ -3,7 +3,8 @@
 import re
 import logging
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Optional, List, Any
+from urllib.parse import urlparse, parse_qs, unquote
 from playwright.sync_api import sync_playwright, Browser, BrowserContext, Page, TimeoutError as PlaywrightTimeoutError
 import requests
 
@@ -46,6 +47,15 @@ class HallmarkAuthenticator:
     # Token extraction patterns
     TOKEN_PATTERN = r'"aura\.token":"([^"]+)"'
     FWUID_PATTERN = r'"fwuid":"([^"]+)"'
+
+    # Salesforce session URL parameters to look for
+    SF_URL_PARAMS = ['sid', 'oid', 'ssoStartPage', 'startURL', 'RelayState']
+
+    # Salesforce session cookies to look for
+    SF_SESSION_COOKIES = [
+        'sid', 'sid_Client', 'oid', 'oinfo', 'inst', 'sfdc_lv2',
+        'BrowserId', 'BrowserId_sec', 'clientSrc', 'force-stream'
+    ]
 
     def __init__(
         self,
@@ -353,7 +363,7 @@ class HallmarkAuthenticator:
             logger.warning(f"Failed to save session state: {e}")
 
     def _extract_tokens(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract Aura framework tokens from page.
+        """Extract Aura framework tokens from page using multiple methods.
 
         Args:
             page: Playwright page object
@@ -361,14 +371,341 @@ class HallmarkAuthenticator:
         Returns:
             Dict with token, context, and fwuid, or None if extraction fails
         """
-        # Try JavaScript extraction first
+        # Log comprehensive debug info about the current state
+        self._log_extraction_debug_info(page)
+
+        # Method 1: Extract from URL parameters (Salesforce session ID)
+        url_tokens = self._extract_tokens_from_url(page)
+        if url_tokens:
+            logger.info("  ✓ Extracted tokens from URL parameters")
+            # URL tokens give us the session ID, but we still need Aura tokens
+            # Store the session ID and continue to get Aura tokens
+
+        # Method 2: Check if page needs to load more before Aura is available
+        # Sometimes after SAML redirect, we need to wait for the SPA to initialize
+        if not self._is_aura_available(page):
+            logger.info("  Aura not available yet, waiting for SPA initialization...")
+            self._wait_for_aura(page)
+
+        # Method 3: Try JavaScript extraction for Aura tokens
         tokens = self._extract_tokens_js(page)
         if tokens:
+            # Merge with any URL tokens we found
+            if url_tokens:
+                tokens['session_id'] = url_tokens.get('session_id', '')
+                tokens['org_id'] = url_tokens.get('org_id', '')
             return tokens
 
-        # Fallback to regex extraction from page source
-        logger.warning("JavaScript extraction failed, trying regex fallback")
-        return self._extract_tokens_regex(page)
+        # Method 4: Try localStorage/sessionStorage
+        logger.warning("JavaScript Aura extraction failed, trying storage...")
+        storage_tokens = self._extract_tokens_from_storage(page)
+        if storage_tokens:
+            if url_tokens:
+                storage_tokens['session_id'] = url_tokens.get('session_id', '')
+                storage_tokens['org_id'] = url_tokens.get('org_id', '')
+            return storage_tokens
+
+        # Method 5: Fallback to regex extraction from page source
+        logger.warning("Storage extraction failed, trying regex fallback...")
+        regex_tokens = self._extract_tokens_regex(page)
+        if regex_tokens:
+            if url_tokens:
+                regex_tokens['session_id'] = url_tokens.get('session_id', '')
+                regex_tokens['org_id'] = url_tokens.get('org_id', '')
+            return regex_tokens
+
+        # Method 6: If we have URL tokens but couldn't get Aura tokens,
+        # try navigating to a page that will initialize Aura
+        if url_tokens:
+            logger.info("  Have session ID but no Aura tokens, attempting to initialize Aura...")
+            return self._initialize_aura_with_session(page, url_tokens)
+
+        logger.error("All token extraction methods failed")
+        return None
+
+    def _log_extraction_debug_info(self, page: Page) -> None:
+        """Log comprehensive debug information about the page state for token extraction.
+
+        Args:
+            page: Playwright page object
+        """
+        logger.info("=== Token Extraction Debug Info ===")
+
+        # Log current URL
+        current_url = page.url
+        logger.info(f"  Current URL: {current_url}")
+
+        # Parse and log URL components
+        parsed = urlparse(current_url)
+        logger.info(f"  URL Host: {parsed.netloc}")
+        logger.info(f"  URL Path: {parsed.path}")
+
+        # Log URL query parameters
+        if parsed.query:
+            logger.info("  URL Query Parameters:")
+            params = parse_qs(parsed.query)
+            for key, values in params.items():
+                for value in values:
+                    # Truncate long values for readability
+                    display_value = value[:80] + "..." if len(value) > 80 else value
+                    # URL decode for clarity
+                    decoded_value = unquote(display_value)
+                    logger.info(f"    {key}: {decoded_value}")
+                    # Highlight session-related params
+                    if key.lower() in ['sid', 'oid', 'sessionid']:
+                        logger.info(f"    ^^^ FOUND SESSION PARAMETER: {key} ^^^")
+        else:
+            logger.info("  URL Query Parameters: (none)")
+
+        # Log all cookies
+        try:
+            cookies = page.context.cookies()
+            logger.info(f"  Cookies ({len(cookies)} total):")
+            for cookie in cookies:
+                name = cookie.get('name', '')
+                value = cookie.get('value', '')[:50]  # Truncate values
+                domain = cookie.get('domain', '')
+                # Highlight session-related cookies
+                is_session = name.lower() in [c.lower() for c in self.SF_SESSION_COOKIES]
+                marker = " *** SESSION COOKIE ***" if is_session else ""
+                logger.info(f"    {name}: {value}... (domain: {domain}){marker}")
+        except Exception as e:
+            logger.warning(f"  Error reading cookies: {e}")
+
+        # Check if Aura framework is available
+        try:
+            aura_available = page.evaluate("() => typeof window.$A !== 'undefined'")
+            logger.info(f"  Aura framework available: {aura_available}")
+            if aura_available:
+                has_token = page.evaluate("() => typeof window.$A.getToken === 'function'")
+                logger.info(f"  Aura getToken available: {has_token}")
+        except Exception as e:
+            logger.warning(f"  Error checking Aura availability: {e}")
+
+        logger.info("=== End Debug Info ===")
+
+    def _extract_tokens_from_url(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract session tokens from URL query parameters.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with session tokens from URL, or None if not found
+        """
+        try:
+            current_url = page.url
+            parsed = urlparse(current_url)
+            params = parse_qs(parsed.query)
+
+            tokens = {}
+
+            # Look for session ID (sid)
+            if 'sid' in params:
+                raw_sid = params['sid'][0]
+                decoded_sid = unquote(raw_sid)
+                tokens['session_id'] = decoded_sid
+                logger.info(f"  Found 'sid' in URL: {decoded_sid[:50]}...")
+
+            # Look for org ID (oid)
+            if 'oid' in params:
+                raw_oid = params['oid'][0]
+                decoded_oid = unquote(raw_oid)
+                tokens['org_id'] = decoded_oid
+                logger.info(f"  Found 'oid' in URL: {decoded_oid}")
+
+            # Look for other useful params
+            for param in self.SF_URL_PARAMS:
+                if param in params and param not in ['sid', 'oid']:
+                    raw_value = params[param][0]
+                    decoded_value = unquote(raw_value)
+                    tokens[param] = decoded_value
+                    logger.debug(f"  Found '{param}' in URL: {decoded_value[:50]}...")
+
+            if tokens:
+                return tokens
+
+        except Exception as e:
+            logger.warning(f"Error extracting tokens from URL: {e}")
+
+        return None
+
+    def _is_aura_available(self, page: Page) -> bool:
+        """Check if Aura framework is available on the page.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            bool: True if Aura framework is available with getToken
+        """
+        try:
+            return page.evaluate("""
+                () => {
+                    return typeof window.$A !== 'undefined' &&
+                           typeof window.$A.getToken === 'function';
+                }
+            """)
+        except Exception:
+            return False
+
+    def _wait_for_aura(self, page: Page, timeout: int = 10000) -> bool:
+        """Wait for Aura framework to become available.
+
+        Args:
+            page: Playwright page object
+            timeout: Maximum time to wait in milliseconds
+
+        Returns:
+            bool: True if Aura became available, False if timeout
+        """
+        try:
+            page.wait_for_function(
+                """() => {
+                    return typeof window.$A !== 'undefined' &&
+                           typeof window.$A.getToken === 'function';
+                }""",
+                timeout=timeout
+            )
+            logger.info("  Aura framework is now available")
+            return True
+        except PlaywrightTimeoutError:
+            logger.warning(f"  Timeout waiting for Aura framework ({timeout}ms)")
+            return False
+
+    def _extract_tokens_from_storage(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract tokens from localStorage and sessionStorage.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens, or None if not found
+        """
+        try:
+            result = page.evaluate("""
+                () => {
+                    const tokens = {};
+                    const storageKeys = [
+                        'aura.token', 'auraToken', 'sfdc.auraToken',
+                        'fwuid', 'aura.context', 'auraContext'
+                    ];
+
+                    // Check localStorage
+                    for (const key of storageKeys) {
+                        const value = localStorage.getItem(key);
+                        if (value) {
+                            tokens['localStorage_' + key] = value;
+                        }
+                    }
+
+                    // Check sessionStorage
+                    for (const key of storageKeys) {
+                        const value = sessionStorage.getItem(key);
+                        if (value) {
+                            tokens['sessionStorage_' + key] = value;
+                        }
+                    }
+
+                    // Also check for any key containing 'token' or 'session'
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const key = localStorage.key(i);
+                        if (key && (key.toLowerCase().includes('token') ||
+                                   key.toLowerCase().includes('session') ||
+                                   key.toLowerCase().includes('aura'))) {
+                            tokens['localStorage_' + key] = localStorage.getItem(key);
+                        }
+                    }
+
+                    for (let i = 0; i < sessionStorage.length; i++) {
+                        const key = sessionStorage.key(i);
+                        if (key && (key.toLowerCase().includes('token') ||
+                                   key.toLowerCase().includes('session') ||
+                                   key.toLowerCase().includes('aura'))) {
+                            tokens['sessionStorage_' + key] = sessionStorage.getItem(key);
+                        }
+                    }
+
+                    return Object.keys(tokens).length > 0 ? tokens : null;
+                }
+            """)
+
+            if result:
+                logger.info(f"  Found {len(result)} items in browser storage:")
+                for key, value in result.items():
+                    display_value = str(value)[:50] + "..." if len(str(value)) > 50 else value
+                    logger.info(f"    {key}: {display_value}")
+
+                # Try to extract the actual tokens we need
+                token = None
+                fwuid = None
+                context = None
+
+                for key, value in result.items():
+                    if 'token' in key.lower() and 'aura' in key.lower():
+                        token = value
+                    elif 'fwuid' in key.lower():
+                        fwuid = value
+                    elif 'context' in key.lower() and 'aura' in key.lower():
+                        context = value
+
+                if token:
+                    return {
+                        'token': token,
+                        'context': context or '',
+                        'fwuid': fwuid or ''
+                    }
+
+        except Exception as e:
+            logger.warning(f"Error extracting tokens from storage: {e}")
+
+        return None
+
+    def _initialize_aura_with_session(self, page: Page, url_tokens: Dict[str, str]) -> Optional[Dict[str, str]]:
+        """Try to initialize Aura framework using the session ID from URL.
+
+        This navigates to a page that should trigger Aura initialization.
+
+        Args:
+            page: Playwright page object
+            url_tokens: Tokens extracted from URL (contains session_id)
+
+        Returns:
+            Dict with tokens, or None if extraction still fails
+        """
+        try:
+            # Navigate to the main app page which should initialize Aura
+            app_url = f"{self.base_url}/s/"
+            logger.info(f"  Navigating to {app_url} to initialize Aura...")
+
+            page.goto(app_url, wait_until="domcontentloaded", timeout=30000)
+
+            # Wait for network to settle
+            try:
+                page.wait_for_load_state("networkidle", timeout=15000)
+            except PlaywrightTimeoutError:
+                logger.warning("  Network idle timeout during Aura initialization")
+
+            # Wait for Aura to become available
+            if self._wait_for_aura(page, timeout=15000):
+                # Try JS extraction again
+                tokens = self._extract_tokens_js(page)
+                if tokens:
+                    tokens['session_id'] = url_tokens.get('session_id', '')
+                    tokens['org_id'] = url_tokens.get('org_id', '')
+                    return tokens
+
+            # Last resort: try regex on this page
+            tokens = self._extract_tokens_regex(page)
+            if tokens:
+                tokens['session_id'] = url_tokens.get('session_id', '')
+                tokens['org_id'] = url_tokens.get('org_id', '')
+                return tokens
+
+        except Exception as e:
+            logger.error(f"Error during Aura initialization: {e}")
+
+        return None
 
     def _extract_tokens_js(self, page: Page) -> Optional[Dict[str, str]]:
         """Extract tokens using JavaScript execution.
