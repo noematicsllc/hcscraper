@@ -133,23 +133,59 @@ class HallmarkAuthenticator:
                 context = browser.new_context()
                 page = context.new_page()
 
-                # Step 1: Navigate to landing page
-                logger.info(f"Navigating to landing page: {self.base_url}")
-                page.goto(self.base_url, wait_until="networkidle", timeout=30000)
-                logger.debug(f"Current URL after landing page load: {page.url}")
+                # Step 1: Navigate to the base URL
+                logger.info(f"Step 1: Navigating to {self.base_url}")
+                page.goto(self.base_url, wait_until="domcontentloaded", timeout=30000)
+                logger.info(f"  Initial URL: {page.url}")
 
-                # Step 2: Click "Retailer Login" button
-                logger.info("Looking for Retailer Login button...")
+                # Step 2: Wait for any automatic redirects to complete and page to stabilize
+                logger.info("Step 2: Waiting for page to stabilize (automatic redirects)...")
                 try:
-                    # Wait for the button to be visible and click it
-                    page.wait_for_selector(self.RETAILER_LOGIN_BUTTON, timeout=15000)
-                    page.click(self.RETAILER_LOGIN_BUTTON)
-                    logger.info("Clicked Retailer Login button")
+                    # Give page time to process any automatic redirects
+                    page.wait_for_load_state("networkidle", timeout=15000)
                 except PlaywrightTimeoutError:
-                    logger.warning("Retailer Login button not found, may already be on login page")
+                    logger.warning("  Network idle timeout - continuing anyway")
 
-                # Step 3: Wait for redirect to PingOne login page
-                logger.info("Waiting for redirect to PingOne login page...")
+                current_url = page.url
+                logger.info(f"  URL after stabilization: {current_url}")
+
+                # Step 3: Determine which page we're on and take appropriate action
+                logger.info("Step 3: Checking current page state...")
+
+                is_on_pingone = "pingone.com" in current_url.lower()
+                is_on_hallmark = "hallmarkconnect.com" in current_url.lower() or "hallmark" in current_url.lower()
+                has_login_field = page.locator(self.USERNAME_FIELD).count() > 0
+
+                logger.info(f"  On PingOne: {is_on_pingone}")
+                logger.info(f"  On Hallmark: {is_on_hallmark}")
+                logger.info(f"  Login field visible: {has_login_field}")
+
+                if is_on_pingone or has_login_field:
+                    # Already redirected to login page - skip button click
+                    logger.info("  → Already on login page, skipping Retailer Login button")
+                elif is_on_hallmark:
+                    # On landing page - need to click Retailer Login button
+                    logger.info("  → On landing page, looking for Retailer Login button...")
+
+                    # Try to find the button with aria-label first (more specific)
+                    retailer_button = page.locator('[aria-label="Retailer Login"]')
+                    if retailer_button.count() > 0:
+                        logger.info("  Found button with aria-label='Retailer Login'")
+                        retailer_button.click()
+                        logger.info("  Clicked Retailer Login button")
+                    else:
+                        # Fall back to text-based selectors
+                        try:
+                            page.wait_for_selector(self.RETAILER_LOGIN_BUTTON, timeout=10000)
+                            page.click(self.RETAILER_LOGIN_BUTTON)
+                            logger.info("  Clicked Retailer Login button (fallback selector)")
+                        except PlaywrightTimeoutError:
+                            logger.warning("  Retailer Login button not found - checking for redirects...")
+                else:
+                    logger.warning(f"  Unknown page state. URL: {current_url}")
+
+                # Step 4: Wait for PingOne login page
+                logger.info("Step 4: Waiting for PingOne login page...")
                 try:
                     # Wait for either PingOne URL or username field to appear
                     page.wait_for_function(
@@ -161,82 +197,98 @@ class HallmarkAuthenticator:
                         }""",
                         timeout=30000
                     )
-                    logger.info(f"Redirected to: {page.url}")
+                    logger.info(f"  Now on login page: {page.url}")
                 except PlaywrightTimeoutError:
-                    logger.warning(f"Timeout waiting for PingOne redirect. Current URL: {page.url}")
+                    logger.warning(f"  Timeout waiting for login page. Current URL: {page.url}")
 
-                # Wait for page to stabilize
-                page.wait_for_load_state("networkidle", timeout=15000)
+                # Wait for page to stabilize before entering credentials
+                try:
+                    page.wait_for_load_state("networkidle", timeout=15000)
+                except PlaywrightTimeoutError:
+                    logger.warning("  Network idle timeout - continuing anyway")
 
-                # Step 4: Wait for and fill username field
-                logger.info("Waiting for username field...")
+                # Step 5: Wait for and fill username field
+                logger.info("Step 5: Entering credentials...")
+                logger.info(f"  Current URL: {page.url}")
                 page.wait_for_selector(self.USERNAME_FIELD, timeout=15000)
-                logger.debug("Entering credentials")
+                logger.info("  Found username field, entering username")
                 page.fill(self.USERNAME_FIELD, self.username)
 
                 # Check if password field is on the same page or separate
                 password_visible = page.locator(self.PASSWORD_FIELD).is_visible()
                 if password_visible:
                     # Both fields on same page
+                    logger.info("  Password field visible, entering password")
                     page.fill(self.PASSWORD_FIELD, self.password)
                     page.click(self.LOGIN_BUTTON)
+                    logger.info("  Clicked login button")
                 else:
                     # Username-first flow: submit username, then enter password
-                    logger.debug("Username-first flow detected, submitting username")
+                    logger.info("  Username-first flow detected, submitting username first")
                     page.click(self.LOGIN_BUTTON)
+                    logger.info("  Waiting for password field...")
                     page.wait_for_selector(self.PASSWORD_FIELD, timeout=15000)
+                    logger.info("  Found password field, entering password")
                     page.fill(self.PASSWORD_FIELD, self.password)
                     page.click(self.LOGIN_BUTTON)
+                    logger.info("  Clicked login button")
 
-                logger.info("Credentials submitted")
+                logger.info("  Credentials submitted successfully")
 
-                # Wait for MFA field or successful redirect
-                logger.info("Waiting for MFA prompt or redirect...")
+                # Step 6: Handle MFA if required
+                logger.info("Step 6: Checking for MFA prompt...")
+                logger.info(f"  Current URL: {page.url}")
                 try:
                     page.wait_for_selector(self.MFA_FIELD, timeout=15000)
-                    logger.info("MFA required")
+                    logger.info("  MFA field detected - MFA required")
 
                     # Get MFA code from handler
                     mfa_code = self.mfa_handler.get_mfa_code()
-                    logger.debug("Received MFA code")
+                    logger.info("  Received MFA code, entering...")
 
                     # Enter MFA code
                     page.fill(self.MFA_FIELD, mfa_code)
                     page.click(self.MFA_SUBMIT)
+                    logger.info("  MFA code submitted")
 
                 except PlaywrightTimeoutError:
-                    logger.info("No MFA prompt detected, continuing")
+                    logger.info("  No MFA prompt detected, continuing...")
 
-                # Wait for navigation to complete - back to Hallmark Connect
-                logger.info("Waiting for authentication to complete and redirect back...")
+                # Step 7: Wait for redirect back to Hallmark Connect
+                logger.info("Step 7: Waiting for redirect back to Hallmark Connect...")
                 try:
                     page.wait_for_function(
                         f"""() => window.location.href.includes('{self.base_url.replace('https://', '')}')""",
                         timeout=30000
                     )
+                    logger.info(f"  Redirected back to: {page.url}")
                 except PlaywrightTimeoutError:
-                    logger.warning(f"Timeout waiting for redirect back. Current URL: {page.url}")
+                    logger.warning(f"  Timeout waiting for redirect. Current URL: {page.url}")
 
-                page.wait_for_load_state("networkidle", timeout=30000)
-                logger.debug(f"Final URL: {page.url}")
+                try:
+                    page.wait_for_load_state("networkidle", timeout=30000)
+                except PlaywrightTimeoutError:
+                    logger.warning("  Network idle timeout - continuing anyway")
+                logger.info(f"  Final URL: {page.url}")
 
-                # Extract tokens
-                logger.info("Extracting session tokens")
+                # Step 8: Extract tokens
+                logger.info("Step 8: Extracting session tokens...")
                 self._tokens = self._extract_tokens(page)
 
                 if not self._tokens:
                     raise Exception("Failed to extract authentication tokens")
 
-                logger.info("Token extraction successful")
+                logger.info("  Token extraction successful")
 
-                # Create requests session with cookies
+                # Step 9: Create requests session with cookies
+                logger.info("Step 9: Creating requests session with cookies...")
                 self._session = self._create_session(page)
 
                 # Save browser session for future use
                 if save_session:
                     self._save_browser_state(context)
 
-                logger.info("Authentication completed successfully")
+                logger.info("✓ Authentication completed successfully")
                 return True
 
             finally:
