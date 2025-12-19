@@ -418,9 +418,56 @@ class HallmarkAuthenticator:
         # try navigating to a page that will initialize Aura
         if url_tokens:
             logger.info("  Have session ID but no Aura tokens, attempting to initialize Aura...")
-            return self._initialize_aura_with_session(page, url_tokens)
+            aura_tokens = self._initialize_aura_with_session(page, url_tokens)
+            if aura_tokens:
+                return aura_tokens
+
+            # Method 7: If we still don't have Aura tokens but have session_id + fwuid,
+            # that's sufficient for authenticated requests - Aura tokens are optional
+            session_id = url_tokens.get('session_id', '')
+            fwuid = self._extract_fwuid_from_page(page)
+
+            if session_id:
+                logger.info("  ✓ Using session ID authentication (Aura tokens optional)")
+                return {
+                    'token': '',  # Empty is OK - will use session cookie
+                    'context': '',  # Empty is OK - will build minimal context
+                    'fwuid': fwuid or '',
+                    'session_id': session_id,
+                    'org_id': url_tokens.get('org_id', '')
+                }
 
         logger.error("All token extraction methods failed")
+        return None
+
+    def _extract_fwuid_from_page(self, page: Page) -> Optional[str]:
+        """Extract just the fwuid from page content via regex.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            fwuid string if found, None otherwise
+        """
+        try:
+            content = page.content()
+
+            fwuid_patterns = [
+                (r'"fwuid"\s*:\s*"([^"]+)"', "fwuid JSON"),
+                (r'fwuid\s*=\s*["\']([^"\']+)["\']', "fwuid assignment"),
+                (r'"FWUID"\s*:\s*"([^"]+)"', "FWUID property"),
+            ]
+
+            for pattern, name in fwuid_patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    fwuid = match.group(1)
+                    logger.info(f"    Found fwuid via pattern '{name}': {fwuid}")
+                    return fwuid
+
+        except Exception as e:
+            logger.debug(f"Error extracting fwuid: {e}")
+
         return None
 
     def _log_extraction_debug_info(self, page: Page) -> None:

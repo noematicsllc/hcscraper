@@ -13,14 +13,14 @@ class AuraRequestBuilder:
 
         Args:
             base_url: Base URL for Hallmark Connect
-            aura_token: Aura authentication token
-            aura_context: Aura context (encoded)
-            fwuid: Framework unique identifier
+            aura_token: Aura authentication token (can be empty if using session auth)
+            aura_context: Aura context (encoded, can be empty)
+            fwuid: Framework unique identifier (can be empty)
         """
         self.base_url = base_url.rstrip('/')
-        self.aura_token = aura_token
-        self.aura_context = aura_context
-        self.fwuid = fwuid
+        self.aura_token = aura_token or ''  # Empty string is OK for session-based auth
+        self.aura_context = aura_context or ''
+        self.fwuid = fwuid or ''
         self.request_counter = 81  # Initial request number
 
     def build_order_detail_request(self, order_id: str) -> Dict[str, Any]:

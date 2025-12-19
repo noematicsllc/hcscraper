@@ -30,10 +30,10 @@ class HallmarkAPIClient:
         """Initialize API client.
 
         Args:
-            session: Authenticated requests session
-            aura_token: Aura authentication token
-            aura_context: Aura context (encoded)
-            fwuid: Framework unique identifier
+            session: Authenticated requests session (with sid cookie for auth)
+            aura_token: Aura authentication token (can be empty if using session auth)
+            aura_context: Aura context (encoded, can be empty)
+            fwuid: Framework unique identifier (can be empty)
             base_url: Base URL for Hallmark Connect
             rate_limit_seconds: Seconds to wait between requests (default: 2.5)
             max_retries: Maximum retry attempts (default: 3)
@@ -44,12 +44,18 @@ class HallmarkAPIClient:
         self.max_retries = max_retries
         self.last_request_time: Optional[float] = None
 
-        # Create request builder
+        # Log authentication mode
+        if aura_token:
+            logger.debug("API client initialized with Aura token authentication")
+        else:
+            logger.info("API client using session-based authentication (no Aura token)")
+
+        # Create request builder (handles empty tokens gracefully)
         self.request_builder = AuraRequestBuilder(
             base_url=base_url,
-            aura_token=aura_token,
-            aura_context=aura_context,
-            fwuid=fwuid
+            aura_token=aura_token or '',
+            aura_context=aura_context or '',
+            fwuid=fwuid or ''
         )
 
     def get_order_detail(self, order_id: str) -> Optional[Dict[str, Any]]:

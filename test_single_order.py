@@ -95,8 +95,10 @@ def main():
 
         print("✓ Authentication successful")
         tokens = authenticator.get_tokens()
-        print(f"  - Token: {tokens['token'][:30]}...")
-        print(f"  - FWUID: {tokens['fwuid']}")
+        token = tokens.get('token', '')
+        fwuid = tokens.get('fwuid', '')
+        print(f"  - Token: {token[:30]}..." if token else "  - Token: (using session auth)")
+        print(f"  - FWUID: {fwuid}" if fwuid else "  - FWUID: (not extracted)")
 
     except Exception as e:
         print(f"\n✗ Authentication error: {e}")
@@ -109,9 +111,9 @@ def main():
     try:
         api_client = HallmarkAPIClient(
             session=authenticator.get_session(),
-            aura_token=tokens['token'],
-            aura_context=tokens['context'],
-            fwuid=tokens['fwuid'],
+            aura_token=tokens.get('token', ''),
+            aura_context=tokens.get('context', ''),
+            fwuid=tokens.get('fwuid', ''),
             base_url=config.base_url,
             rate_limit_seconds=config.rate_limit_seconds,
             max_retries=config.max_retries
