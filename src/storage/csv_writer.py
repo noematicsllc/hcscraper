@@ -99,3 +99,78 @@ class CSVWriter:
                 rows.append(row)
 
         return rows
+
+    def save_billing_document(self, billing_document_id: str, billing_data: Dict[str, Any]) -> Path:
+        """Save billing document data to CSV file (flattened format).
+
+        Args:
+            billing_document_id: The billing document ID
+            billing_data: The billing document data to save
+
+        Returns:
+            Path to the saved file
+
+        Raises:
+            IOError: If file write fails
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"billing_{billing_document_id}_{timestamp}.csv"
+        filepath = self.output_directory / filename
+
+        try:
+            # Extract line items if available
+            rows = self._flatten_billing_data(billing_document_id, billing_data)
+
+            if not rows:
+                logger.warning(f"No data to write for billing document {billing_document_id}")
+                return filepath
+
+            # Write CSV
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                if rows:
+                    writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+            logger.info(f"Saved billing document {billing_document_id} to {filepath}")
+            return filepath
+
+        except IOError as e:
+            logger.error(f"Failed to write CSV file {filepath}: {e}")
+            raise
+
+    def _flatten_billing_data(self, billing_document_id: str, billing_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Flatten billing document data into CSV rows.
+
+        Args:
+            billing_document_id: The billing document ID
+            billing_data: The billing document data
+
+        Returns:
+            List of dicts representing CSV rows
+        """
+        rows = []
+
+        if isinstance(billing_data, dict):
+            # If there are line items, create one row per item
+            line_items = billing_data.get('lineItems', billing_data.get('items', []))
+
+            if line_items and isinstance(line_items, list):
+                for item in line_items:
+                    if isinstance(item, dict):
+                        row = {
+                            'billing_document_id': billing_document_id,
+                            'extracted_at': datetime.now().isoformat(),
+                            **item
+                        }
+                        rows.append(row)
+            else:
+                # No line items, just save document-level data
+                row = {
+                    'billing_document_id': billing_document_id,
+                    'extracted_at': datetime.now().isoformat(),
+                    **billing_data
+                }
+                rows.append(row)
+
+        return rows

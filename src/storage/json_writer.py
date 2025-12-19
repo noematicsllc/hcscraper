@@ -56,3 +56,38 @@ class JSONWriter:
         except IOError as e:
             logger.error(f"Failed to write JSON file {filepath}: {e}")
             raise
+
+    def save_billing_document(self, billing_document_id: str, billing_data: Dict[str, Any]) -> Path:
+        """Save billing document data to JSON file.
+
+        Args:
+            billing_document_id: The billing document ID
+            billing_data: The billing document data to save
+
+        Returns:
+            Path to the saved file
+
+        Raises:
+            IOError: If file write fails
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"billing_{billing_document_id}_{timestamp}.json"
+        filepath = self.output_directory / filename
+
+        # Wrap data with metadata
+        output = {
+            "billing_document_id": billing_document_id,
+            "extracted_at": datetime.now().isoformat(),
+            "data": billing_data
+        }
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(output, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"Saved billing document {billing_document_id} to {filepath}")
+            return filepath
+
+        except IOError as e:
+            logger.error(f"Failed to write JSON file {filepath}: {e}")
+            raise

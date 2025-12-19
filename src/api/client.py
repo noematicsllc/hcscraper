@@ -83,6 +83,37 @@ class HallmarkAPIClient:
         # Parse Aura response
         return self._parse_aura_response(response_data, order_id)
 
+    def get_billing_document_detail(self, billing_document_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve billing document detail from Hallmark Connect.
+
+        Args:
+            billing_document_id: The billing document ID to retrieve
+
+        Returns:
+            Dict containing billing document data, or None if request fails
+
+        Raises:
+            requests.RequestException: If all retry attempts fail
+        """
+        logger.info(f"Retrieving billing document detail for {billing_document_id}")
+
+        # Build request
+        request_spec = self.request_builder.build_billing_document_detail_request(billing_document_id)
+
+        # Execute with retry logic
+        response_data = self._execute_request(
+            url=request_spec['url'],
+            headers=request_spec['headers'],
+            data=request_spec['data']
+        )
+
+        if response_data is None:
+            logger.error(f"Failed to retrieve billing document {billing_document_id}")
+            return None
+
+        # Parse Aura response
+        return self._parse_aura_response(response_data, billing_document_id)
+
     def _execute_request(
         self,
         url: str,
