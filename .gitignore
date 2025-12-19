@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Environment variables (NEVER commit)
+.env
+
+# Session files (NEVER commit - contains authentication state)
+hallmark_session.json
+*_session.json
+
+# Data and logs
+data/
+*.log
+*.json.bak
+checkpoint.json
+
+# Playwright
+.playwright/
+playwright-state/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
