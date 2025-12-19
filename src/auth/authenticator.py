@@ -23,8 +23,25 @@ class HallmarkAuthenticator:
     USERNAME_FIELD = "input[name='username'], input[id='username'], input[type='email'], input[name='identifier']"
     PASSWORD_FIELD = "input[name='password'], input[id='password'], input[type='password']"
     LOGIN_BUTTON = "button[type='submit'], input[type='submit'], button:has-text('Sign On'), button:has-text('Sign In'), button:has-text('Log In')"
-    MFA_FIELD = "input[name='code'], input[name='verificationCode'], input[type='text'][placeholder*='code' i], input[name='otp']"
-    MFA_SUBMIT = "button[type='submit'], button:has-text('Verify'), button:has-text('Submit')"
+    MFA_FIELD = "input[name='code'], input[name='verificationCode'], input[type='text'][placeholder*='code' i], input[name='otp'], input[id='otp-code'], input[id*='otp'], input[id*='code'], input[autocomplete='one-time-code']"
+    # Expanded MFA submit selectors for PingOne and other auth providers
+    MFA_SUBMIT_SELECTORS = [
+        "button[type='submit']",
+        "input[type='submit']",
+        "button:has-text('Verify')",
+        "button:has-text('Continue')",
+        "button:has-text('Submit')",
+        "button:has-text('Sign On')",
+        "button:has-text('Sign In')",
+        "button:has-text('Confirm')",
+        "button:has-text('Next')",
+        "button[data-id='submit-button']",
+        "button.btn-primary",
+        "button.primary",
+        "form button",
+        "[role='button']:has-text('Verify')",
+        "[role='button']:has-text('Continue')",
+    ]
 
     # Token extraction patterns
     TOKEN_PATTERN = r'"aura\.token":"([^"]+)"'
@@ -242,14 +259,42 @@ class HallmarkAuthenticator:
                     page.wait_for_selector(self.MFA_FIELD, timeout=15000)
                     logger.info("  MFA field detected - MFA required")
 
+                    # Log what MFA-related elements are visible on the page
+                    self._log_mfa_page_elements(page)
+
                     # Get MFA code from handler
                     mfa_code = self.mfa_handler.get_mfa_code()
-                    logger.info("  Received MFA code, entering...")
+                    logger.info(f"  Received MFA code ({len(mfa_code)} characters), entering...")
 
                     # Enter MFA code
-                    page.fill(self.MFA_FIELD, mfa_code)
-                    page.click(self.MFA_SUBMIT)
-                    logger.info("  MFA code submitted")
+                    mfa_input = page.locator(self.MFA_FIELD).first
+                    mfa_input.fill(mfa_code)
+                    logger.info("  MFA code entered into field")
+
+                    # Small delay to ensure code is registered
+                    page.wait_for_timeout(500)
+
+                    # Find and click the MFA submit button
+                    submit_clicked = self._click_mfa_submit_button(page)
+                    if not submit_clicked:
+                        logger.warning("  Could not find MFA submit button - trying Enter key")
+                        mfa_input.press("Enter")
+                        logger.info("  Pressed Enter key to submit MFA form")
+
+                    # Wait for the MFA form to process and redirect
+                    logger.info("  Waiting for MFA verification and redirect...")
+                    try:
+                        # Wait for URL to change away from current (PingOne) URL
+                        current_url = page.url
+                        page.wait_for_function(
+                            f"""() => window.location.href !== '{current_url}'""",
+                            timeout=30000
+                        )
+                        logger.info(f"  MFA verified! Redirected to: {page.url}")
+                    except PlaywrightTimeoutError:
+                        logger.warning(f"  Timeout waiting for post-MFA redirect. Current URL: {page.url}")
+                        # Log page state for debugging
+                        self._log_mfa_page_elements(page)
 
                 except PlaywrightTimeoutError:
                     logger.info("  No MFA prompt detected, continuing...")
@@ -454,3 +499,107 @@ class HallmarkAuthenticator:
         if self.session_file.exists():
             self.session_file.unlink()
             logger.info(f"Deleted saved session: {self.session_file}")
+
+    def _log_mfa_page_elements(self, page: Page) -> None:
+        """Log MFA-related elements visible on the page for debugging.
+
+        Args:
+            page: Playwright page object
+        """
+        logger.info("  === MFA Page Element Analysis ===")
+
+        # Log all buttons on the page
+        try:
+            buttons = page.locator("button").all()
+            logger.info(f"  Found {len(buttons)} button elements:")
+            for i, btn in enumerate(buttons[:10]):  # Limit to first 10
+                try:
+                    text = btn.inner_text().strip()[:50] if btn.is_visible() else "(hidden)"
+                    btn_type = btn.get_attribute("type") or "no-type"
+                    btn_class = btn.get_attribute("class") or "no-class"
+                    logger.info(f"    [{i}] text='{text}' type='{btn_type}' class='{btn_class[:50]}'")
+                except Exception:
+                    logger.info(f"    [{i}] (could not read button)")
+        except Exception as e:
+            logger.warning(f"  Error reading buttons: {e}")
+
+        # Log all input[type=submit] elements
+        try:
+            submits = page.locator("input[type='submit']").all()
+            logger.info(f"  Found {len(submits)} input[type=submit] elements:")
+            for i, sub in enumerate(submits[:5]):
+                try:
+                    value = sub.get_attribute("value") or "no-value"
+                    logger.info(f"    [{i}] value='{value}'")
+                except Exception:
+                    logger.info(f"    [{i}] (could not read submit input)")
+        except Exception as e:
+            logger.warning(f"  Error reading submit inputs: {e}")
+
+        # Log forms on the page
+        try:
+            forms = page.locator("form").all()
+            logger.info(f"  Found {len(forms)} form elements:")
+            for i, form in enumerate(forms[:5]):
+                try:
+                    action = form.get_attribute("action") or "no-action"
+                    method = form.get_attribute("method") or "no-method"
+                    logger.info(f"    [{i}] action='{action[:50]}' method='{method}'")
+                except Exception:
+                    logger.info(f"    [{i}] (could not read form)")
+        except Exception as e:
+            logger.warning(f"  Error reading forms: {e}")
+
+        # Log MFA input field details
+        try:
+            mfa_inputs = page.locator(self.MFA_FIELD).all()
+            logger.info(f"  Found {len(mfa_inputs)} MFA input field(s):")
+            for i, inp in enumerate(mfa_inputs[:3]):
+                try:
+                    name = inp.get_attribute("name") or "no-name"
+                    inp_id = inp.get_attribute("id") or "no-id"
+                    inp_type = inp.get_attribute("type") or "no-type"
+                    placeholder = inp.get_attribute("placeholder") or "no-placeholder"
+                    logger.info(f"    [{i}] name='{name}' id='{inp_id}' type='{inp_type}' placeholder='{placeholder}'")
+                except Exception:
+                    logger.info(f"    [{i}] (could not read input)")
+        except Exception as e:
+            logger.warning(f"  Error reading MFA inputs: {e}")
+
+        logger.info("  === End MFA Page Analysis ===")
+
+    def _click_mfa_submit_button(self, page: Page) -> bool:
+        """Find and click the MFA submit button.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            bool: True if a button was found and clicked, False otherwise
+        """
+        logger.info("  Searching for MFA submit button...")
+
+        for selector in self.MFA_SUBMIT_SELECTORS:
+            try:
+                locator = page.locator(selector)
+                count = locator.count()
+                if count > 0:
+                    # Find the first visible button matching this selector
+                    for i in range(count):
+                        btn = locator.nth(i)
+                        if btn.is_visible():
+                            text = ""
+                            try:
+                                text = btn.inner_text().strip()[:30]
+                            except Exception:
+                                pass
+                            logger.info(f"    Found visible button with selector '{selector}': '{text}'")
+                            btn.click()
+                            logger.info(f"  ✓ Clicked MFA submit button: '{text}' (selector: {selector})")
+                            return True
+            except Exception as e:
+                logger.debug(f"    Selector '{selector}' failed: {e}")
+                continue
+
+        logger.warning("  No MFA submit button found with any selector")
+        return False
