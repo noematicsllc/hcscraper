@@ -129,11 +129,12 @@ def main():
     print("-" * 60)
 
     tokens = authenticator.get_tokens()
+    # Aura tokens are optional - session-based auth works with just sid cookie
     api_client = HallmarkAPIClient(
         session=authenticator.get_session(),
-        aura_token=tokens['token'],
-        aura_context=tokens['context'],
-        fwuid=tokens['fwuid'],
+        aura_token=tokens.get('token', ''),
+        aura_context=tokens.get('context', ''),
+        fwuid=tokens.get('fwuid', ''),
         base_url=config.base_url,
         rate_limit_seconds=config.rate_limit_seconds,
         max_retries=config.max_retries

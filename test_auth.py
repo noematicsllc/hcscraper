@@ -87,9 +87,14 @@ def main():
             # Display extracted tokens
             tokens = authenticator.get_tokens()
             print(f"\nExtracted tokens:")
-            print(f"  - aura.token: {tokens['token'][:50]}..." if len(tokens['token']) > 50 else f"  - aura.token: {tokens['token']}")
-            print(f"  - fwuid: {tokens['fwuid']}")
-            print(f"  - context: {'Present' if tokens['context'] else 'Not extracted'}")
+            token = tokens.get('token', '')
+            fwuid = tokens.get('fwuid', '')
+            context = tokens.get('context', '')
+            session_id = tokens.get('session_id', '')
+            print(f"  - aura.token: {token[:50]}..." if len(token) > 50 else f"  - aura.token: {token or '(using session auth)'}")
+            print(f"  - fwuid: {fwuid}" if fwuid else "  - fwuid: (not extracted)")
+            print(f"  - context: {'Present' if context else 'Not extracted'}")
+            print(f"  - session_id: {session_id[:30]}..." if session_id else "  - session_id: (in cookies)")
 
             # Display session info
             session = authenticator.get_session()
