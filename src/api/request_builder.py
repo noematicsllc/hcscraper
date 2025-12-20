@@ -85,12 +85,12 @@ class AuraRequestBuilder:
                     "params": {
                         "pageSize": -1,
                         "pageNumber": -1,
-                        "searchSort": json.dumps([{
-                            "columnName": "materialNumber",
-                            "sortorder": "asc",
-                            "priority": 1
-                        }]),
-                        "billingDocumentId": billing_document_id,
+                        "searchSort": json.dumps([
+                            {"columnName": "wholesales", "sortorder": "Desc", "priority": 1},
+                            {"columnName": "materialDescription", "sortorder": "asc", "priority": 2},
+                            {"columnName": "pricePerWholesaleUnit", "sortorder": "Desc", "priority": 3}
+                        ]),
+                        "invoiceId": billing_document_id,
                         "cacheable": False,
                         "isContinuation": False
                     }
