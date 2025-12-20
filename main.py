@@ -40,8 +40,13 @@ def parse_args():
         action="store_true",
         help="Search and download orders by date range"
     )
+    group.add_argument(
+        "--bulk-billing",
+        action="store_true",
+        help="Search and download billing documents by date range"
+    )
 
-    # Bulk order options
+    # Bulk order/billing options
     parser.add_argument(
         "--start-date",
         type=str,
@@ -61,6 +66,13 @@ def parse_args():
         "--search-only",
         action="store_true",
         help="Only search and show summary, don't download orders"
+    )
+    parser.add_argument(
+        "--billing-status",
+        type=str,
+        choices=["All", "Paid", "Unpaid"],
+        default="All",
+        help="Billing status filter for --bulk-billing (default: All)"
     )
 
     # Configuration overrides
@@ -111,6 +123,7 @@ def main():
     from src.api.client import HallmarkAPIClient
     from src.extractors.order_extractor import OrderExtractor
     from src.extractors.bulk_order_extractor import BulkOrderExtractor
+    from src.extractors.bulk_billing_extractor import BulkBillingExtractor
 
     # Step 1: Authenticate
     print("Step 1: Authenticating...")
@@ -278,8 +291,61 @@ def main():
 
             return 0 if stats['failed'] == 0 else 1
 
+    elif args.bulk_billing:
+        # Validate required arguments
+        if not args.start_date or not args.end_date:
+            print("✗ --bulk-billing requires --start-date and --end-date")
+            return 1
+
+        # Parse customer IDs if provided
+        customer_ids = None
+        if args.customer_ids:
+            customer_ids = args.customer_ids.split(",")
+
+        # Create bulk billing extractor
+        bulk_billing_extractor = BulkBillingExtractor(
+            api_client=api_client,
+            output_directory=output_dir,
+            customer_ids=customer_ids,
+            billing_status=args.billing_status,
+            save_json=True,
+            save_csv=True
+        )
+
+        if args.search_only:
+            # Just show summary
+            summary = bulk_billing_extractor.get_search_summary(args.start_date, args.end_date)
+            if summary:
+                print(f"\nBilling Documents Search Summary:")
+                print(f"  Date range: {summary['start_date']} to {summary['end_date']}")
+                print(f"  Billing status: {summary['billing_status']}")
+                print(f"  Total billing documents found: {summary['total_billing_documents']}")
+                print(f"  Customer IDs searched: {summary['customer_ids_count']}")
+                return 0
+            else:
+                print("✗ Failed to get search summary")
+                return 1
+        else:
+            # Search and download
+            print(f"Searching for billing documents from {args.start_date} to {args.end_date}...")
+            stats = bulk_billing_extractor.search_and_download(args.start_date, args.end_date)
+
+            print("\n" + "=" * 60)
+            print("Bulk Billing Extraction Summary")
+            print("=" * 60)
+            print(f"Billing documents found in search: {stats['total_found']}")
+            print(f"Billing documents processed: {stats['total_downloaded']}")
+            print(f"Successful: {stats['successful']}")
+            print(f"Failed: {stats['failed']}")
+            if stats['failed_billing_document_ids']:
+                print(f"\nFailed billing document IDs:")
+                for doc_id in stats['failed_billing_document_ids']:
+                    print(f"  - {doc_id}")
+
+            return 0 if stats['failed'] == 0 else 1
+
     else:
-        print("✗ Please specify --order-id, --orders, --resume, or --bulk-orders")
+        print("✗ Please specify --order-id, --orders, --resume, --bulk-orders, or --bulk-billing")
         return 1
 
 

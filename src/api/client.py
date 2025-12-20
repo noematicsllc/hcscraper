@@ -235,6 +235,96 @@ class HallmarkAPIClient:
         # Parse Aura response
         return self._parse_aura_response(response_data, "search_filter_request")
 
+    def search_billing_documents(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        billing_status: str = "All",
+        page_size: int = 50,
+        page_number: int = 1
+    ) -> Optional[Dict[str, Any]]:
+        """Search for billing documents matching criteria.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            billing_status: Billing status filter ("All", "Paid", "Unpaid")
+            page_size: Number of results per page (default: 50)
+            page_number: Page number to retrieve (default: 1)
+
+        Returns:
+            Dict containing search results, or None if request fails
+        """
+        logger.info(f"Searching billing documents from {start_date} to {end_date}, page {page_number}")
+
+        # Build request
+        request_spec = self.request_builder.build_billing_document_search_request(
+            customer_ids=customer_ids,
+            start_date=start_date,
+            end_date=end_date,
+            billing_status=billing_status,
+            page_size=page_size,
+            page_number=page_number
+        )
+
+        # Execute with retry logic
+        response_data = self._execute_request(
+            url=request_spec['url'],
+            headers=request_spec['headers'],
+            data=request_spec['data']
+        )
+
+        if response_data is None:
+            logger.error(f"Failed to search billing documents for page {page_number}")
+            return None
+
+        # Parse Aura response
+        return self._parse_aura_response(response_data, f"billing_search_page_{page_number}")
+
+    def construct_billing_search_filter_request(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        billing_status: str = "All"
+    ) -> Optional[Dict[str, Any]]:
+        """Construct billing search filter request for download.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            billing_status: Billing status filter ("All", "Paid", "Unpaid")
+
+        Returns:
+            Dict containing filter request data, or None if request fails
+        """
+        logger.info(f"Constructing billing search filter request for {start_date} to {end_date}")
+
+        # Build request
+        request_spec = self.request_builder.build_billing_search_filter_request(
+            customer_ids=customer_ids,
+            start_date=start_date,
+            end_date=end_date,
+            billing_status=billing_status
+        )
+
+        # Execute with retry logic
+        response_data = self._execute_request(
+            url=request_spec['url'],
+            headers=request_spec['headers'],
+            data=request_spec['data']
+        )
+
+        if response_data is None:
+            logger.error("Failed to construct billing search filter request")
+            return None
+
+        # Parse Aura response
+        return self._parse_aura_response(response_data, "billing_search_filter_request")
+
     def _execute_request(
         self,
         url: str,

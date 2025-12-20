@@ -362,3 +362,128 @@ class AuraRequestBuilder:
             message=action_payload,
             page_uri="/s/orders"
         )
+
+    def build_billing_document_search_request(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        billing_status: str = "All",
+        page_size: int = 50,
+        page_number: int = 1
+    ) -> Dict[str, Any]:
+        """Build request for billing document search.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            billing_status: Billing status filter ("All", "Paid", "Unpaid")
+            page_size: Number of results per page (default: 50)
+            page_number: Page number to retrieve (default: 1)
+
+        Returns:
+            Dict with 'url', 'headers', and 'data' for the request
+        """
+        # Convert list to comma-separated string if necessary
+        if isinstance(customer_ids, list):
+            customer_ids_str = ",".join(customer_ids)
+        else:
+            customer_ids_str = customer_ids
+
+        # Build search filters JSON
+        search_filters = json.dumps({
+            "customerIds": customer_ids_str,
+            "customerSearchType": "combobox",
+            "billingDocumentStartDate": start_date,
+            "billingDocumentEndDate": end_date,
+            "billingStatus": billing_status
+        })
+
+        # Build search sort JSON
+        search_sort = json.dumps([
+            {"columnName": "storeName", "sortorder": "asc", "priority": 1},
+            {"columnName": "billingDocumentDate", "sortorder": "Desc", "priority": 2},
+            {"columnName": "billingDocumentNumber", "sortorder": "asc", "priority": 3}
+        ])
+
+        # Build action payload
+        action_payload = {
+            "actions": [{
+                "id": "761;a",
+                "descriptor": "aura://ApexActionController/ACTION$execute",
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "namespace": "",
+                    "classname": "Portal_BillingDocumentsController",
+                    "method": "getBillingDocumentsSAPSearchResult",
+                    "params": {
+                        "pageSize": page_size,
+                        "pageNumber": page_number,
+                        "searchFilters": search_filters,
+                        "searchSort": search_sort,
+                        "searchType": "Invoices"
+                    }
+                }
+            }]
+        }
+
+        return self._build_request(
+            message=action_payload,
+            page_uri="/s/billingdocuments"
+        )
+
+    def build_billing_search_filter_request(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        billing_status: str = "All"
+    ) -> Dict[str, Any]:
+        """Build request to construct billing search filter for download.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            billing_status: Billing status filter ("All", "Paid", "Unpaid")
+
+        Returns:
+            Dict with 'url', 'headers', and 'data' for the request
+        """
+        # Convert list to comma-separated string if necessary
+        if isinstance(customer_ids, list):
+            customer_ids_str = ",".join(customer_ids)
+        else:
+            customer_ids_str = customer_ids
+
+        # Build search filters JSON
+        search_filters = json.dumps({
+            "customerIds": customer_ids_str,
+            "customerSearchType": "combobox",
+            "billingDocumentStartDate": start_date,
+            "billingDocumentEndDate": end_date,
+            "billingStatus": billing_status
+        })
+
+        # Build action payload
+        action_payload = {
+            "actions": [{
+                "id": "761;a",
+                "descriptor": "aura://ApexActionController/ACTION$execute",
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "namespace": "",
+                    "classname": "Portal_BillingDocumentsController",
+                    "method": "constructSearchFilterRequest",
+                    "params": {
+                        "searchFilters": search_filters
+                    }
+                }
+            }]
+        }
+
+        return self._build_request(
+            message=action_payload,
+            page_uri="/s/billingdocuments"
+        )
