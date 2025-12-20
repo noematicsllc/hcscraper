@@ -1,7 +1,7 @@
 """Salesforce Aura API request builder."""
 
 import json
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 from urllib.parse import urlencode
 
 
@@ -243,3 +243,122 @@ class AuraRequestBuilder:
         }
 
         return self._build_request(message=action_payload, page_uri=page_uri)
+
+    def build_order_search_request(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        page_size: int = 50,
+        page_number: int = 1
+    ) -> Dict[str, Any]:
+        """Build request for order search.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            page_size: Number of results per page (default: 50)
+            page_number: Page number to retrieve (default: 1)
+
+        Returns:
+            Dict with 'url', 'headers', and 'data' for the request
+        """
+        # Convert list to comma-separated string if necessary
+        if isinstance(customer_ids, list):
+            customer_ids_str = ",".join(customer_ids)
+        else:
+            customer_ids_str = customer_ids
+
+        # Build search filters JSON
+        search_filters = json.dumps({
+            "customerIds": customer_ids_str,
+            "customerSearchType": "combobox",
+            "orderCreationStartDate": start_date,
+            "orderCreationEndDate": end_date
+        })
+
+        # Build search sort JSON
+        search_sort = json.dumps([
+            {"columnName": "storeName", "sortorder": "asc", "priority": 1},
+            {"columnName": "orderCreationDate", "sortorder": "Desc", "priority": 2},
+            {"columnName": "orderId", "sortorder": "Desc", "priority": 3}
+        ])
+
+        # Build action payload
+        action_payload = {
+            "actions": [{
+                "id": "761;a",
+                "descriptor": "aura://ApexActionController/ACTION$execute",
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "namespace": "",
+                    "classname": "Portal_OrderController",
+                    "method": "getOrderSAPSearchResult",
+                    "params": {
+                        "pageSize": page_size,
+                        "pageNumber": page_number,
+                        "searchFilters": search_filters,
+                        "searchSort": search_sort,
+                        "searchType": "Orders"
+                    }
+                }
+            }]
+        }
+
+        return self._build_request(
+            message=action_payload,
+            page_uri="/s/orders"
+        )
+
+    def build_search_filter_request(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str
+    ) -> Dict[str, Any]:
+        """Build request to construct search filter for download.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Returns:
+            Dict with 'url', 'headers', and 'data' for the request
+        """
+        # Convert list to comma-separated string if necessary
+        if isinstance(customer_ids, list):
+            customer_ids_str = ",".join(customer_ids)
+        else:
+            customer_ids_str = customer_ids
+
+        # Build search filters JSON
+        search_filters = json.dumps({
+            "customerIds": customer_ids_str,
+            "customerSearchType": "combobox",
+            "orderCreationStartDate": start_date,
+            "orderCreationEndDate": end_date
+        })
+
+        # Build action payload
+        action_payload = {
+            "actions": [{
+                "id": "761;a",
+                "descriptor": "aura://ApexActionController/ACTION$execute",
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "namespace": "",
+                    "classname": "Portal_OrderController",
+                    "method": "constructSearchFilterRequest",
+                    "params": {
+                        "searchFilters": search_filters
+                    }
+                }
+            }]
+        }
+
+        return self._build_request(
+            message=action_payload,
+            page_uri="/s/orders"
+        )
