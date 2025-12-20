@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  hcscraper:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hcscraper
+    volumes:
+      # Mount data directory so downloaded files are accessible on host
+      - ./data:/app/data
+      # Mount reports directory for profiling reports
+      - ./reports:/app/reports
+      # Mount session file for persistence across container restarts (optional, created if missing)
+      - ./hallmark_session.json:/app/hallmark_session.json
+      # Mount .env file (make sure it exists on host)
+      - ./.env:/app/.env:ro
+      # Optional: mount order files if you have them
+      # - ./orders.txt:/app/orders.txt:ro
+    environment:
+      # Override OUTPUT_DIRECTORY to use mounted volume
+      - OUTPUT_DIRECTORY=/app/data
+    # Keep container running (remove if you want it to exit after command)
+    stdin_open: true
+    tty: true
+    # Run interactively to handle MFA input if needed
+    # Remove this if using headless mode or webhook MFA
+    # command: python main.py --headless --order-id 3076428648
+

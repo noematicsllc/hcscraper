@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Project specific
+data/
+reports/
+*.log
+hallmark_session.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Docker
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Documentation
+*.md
+CLAUDE.md
+hallmark_automation_spec.md
+
+# Tests
+tests/
+test_*.py
+
+# Environment
+.env
+.env.example
+.env.local
+

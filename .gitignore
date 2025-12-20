@@ -18,6 +18,7 @@ hallmark_session.json
 
 # Data and logs
 data/
+reports/
 *.log
 *.json.bak
 checkpoint.json
