@@ -2,7 +2,7 @@
 
 import time
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 import requests
 
 from .request_builder import AuraRequestBuilder
@@ -150,6 +150,90 @@ class HallmarkAPIClient:
 
         # Parse Aura response
         return self._parse_aura_response(response_data, delivery_id)
+
+    def search_orders(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        page_size: int = 50,
+        page_number: int = 1
+    ) -> Optional[Dict[str, Any]]:
+        """Search for orders matching criteria.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            page_size: Number of results per page (default: 50)
+            page_number: Page number to retrieve (default: 1)
+
+        Returns:
+            Dict containing search results, or None if request fails
+        """
+        logger.info(f"Searching orders from {start_date} to {end_date}, page {page_number}")
+
+        # Build request
+        request_spec = self.request_builder.build_order_search_request(
+            customer_ids=customer_ids,
+            start_date=start_date,
+            end_date=end_date,
+            page_size=page_size,
+            page_number=page_number
+        )
+
+        # Execute with retry logic
+        response_data = self._execute_request(
+            url=request_spec['url'],
+            headers=request_spec['headers'],
+            data=request_spec['data']
+        )
+
+        if response_data is None:
+            logger.error(f"Failed to search orders for page {page_number}")
+            return None
+
+        # Parse Aura response
+        return self._parse_aura_response(response_data, f"search_page_{page_number}")
+
+    def construct_search_filter_request(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str
+    ) -> Optional[Dict[str, Any]]:
+        """Construct search filter request for download.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+
+        Returns:
+            Dict containing filter request data, or None if request fails
+        """
+        logger.info(f"Constructing search filter request for {start_date} to {end_date}")
+
+        # Build request
+        request_spec = self.request_builder.build_search_filter_request(
+            customer_ids=customer_ids,
+            start_date=start_date,
+            end_date=end_date
+        )
+
+        # Execute with retry logic
+        response_data = self._execute_request(
+            url=request_spec['url'],
+            headers=request_spec['headers'],
+            data=request_spec['data']
+        )
+
+        if response_data is None:
+            logger.error("Failed to construct search filter request")
+            return None
+
+        # Parse Aura response
+        return self._parse_aura_response(response_data, "search_filter_request")
 
     def _execute_request(
         self,
