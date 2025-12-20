@@ -1,14 +1,21 @@
 """Hallmark Connect API client with retry logic and rate limiting."""
 
 import time
+import random
 import logging
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Callable
 import requests
 
 from .request_builder import AuraRequestBuilder
 
 
 logger = logging.getLogger(__name__)
+
+
+class RequestType:
+    """Constants for request types."""
+    DETAIL = "detail"
+    SEARCH = "search"
 
 
 class HallmarkAPIClient:
@@ -25,7 +32,23 @@ class HallmarkAPIClient:
         fwuid: str,
         base_url: str = "https://services.hallmarkconnect.com",
         rate_limit_seconds: float = 2.5,
-        max_retries: int = 3
+        max_retries: int = 3,
+        # Timeout settings
+        request_timeout_seconds: float = 30,
+        search_timeout_seconds: float = 120,
+        # Rate limiting settings
+        rate_limit_detail_seconds: Optional[float] = None,
+        rate_limit_search_seconds: float = 5.0,
+        rate_limit_jitter_seconds: float = 0.5,
+        # Break settings
+        break_after_requests: int = 25,
+        break_after_jitter: int = 5,
+        break_duration_seconds: float = 60,
+        break_jitter_seconds: float = 15,
+        # Conservative mode
+        conservative_mode: bool = False,
+        # Callbacks
+        on_break_callback: Optional[Callable[[int, float], None]] = None
     ):
         """Initialize API client.
 
@@ -35,14 +58,60 @@ class HallmarkAPIClient:
             aura_context: Aura context (encoded, can be empty)
             fwuid: Framework unique identifier (can be empty)
             base_url: Base URL for Hallmark Connect
-            rate_limit_seconds: Seconds to wait between requests (default: 2.5)
+            rate_limit_seconds: Legacy - seconds to wait between requests (default: 2.5)
             max_retries: Maximum retry attempts (default: 3)
+            request_timeout_seconds: Timeout for detail requests (default: 30)
+            search_timeout_seconds: Timeout for search requests (default: 120)
+            rate_limit_detail_seconds: Delay between detail requests (default: rate_limit_seconds)
+            rate_limit_search_seconds: Delay between search requests (default: 5.0)
+            rate_limit_jitter_seconds: Random jitter for rate limits (default: 0.5)
+            break_after_requests: Number of requests before taking a break (default: 25)
+            break_after_jitter: Randomize break interval (default: 5)
+            break_duration_seconds: Base break duration (default: 60)
+            break_jitter_seconds: Randomize break duration (default: 15)
+            conservative_mode: Double delays and halve requests between breaks (default: False)
+            on_break_callback: Called when taking a break (request_count, break_duration)
         """
         self.session = session
         self.base_url = base_url
-        self.rate_limit_seconds = rate_limit_seconds
         self.max_retries = max_retries
         self.last_request_time: Optional[float] = None
+        self.on_break_callback = on_break_callback
+
+        # Apply conservative mode multipliers
+        conservative_multiplier = 2.0 if conservative_mode else 1.0
+        break_request_divisor = 2 if conservative_mode else 1
+
+        # Timeout settings
+        self.request_timeout = request_timeout_seconds
+        self.search_timeout = search_timeout_seconds
+
+        # Rate limiting settings (with conservative mode applied)
+        self.rate_limit_detail = (rate_limit_detail_seconds or rate_limit_seconds) * conservative_multiplier
+        self.rate_limit_search = rate_limit_search_seconds * conservative_multiplier
+        self.rate_limit_jitter = rate_limit_jitter_seconds * conservative_multiplier
+
+        # Break settings (with conservative mode applied)
+        self.break_after_requests = max(1, break_after_requests // break_request_divisor)
+        self.break_after_jitter = max(0, break_after_jitter // break_request_divisor)
+        self.break_duration = break_duration_seconds * conservative_multiplier
+        self.break_jitter = break_jitter_seconds * conservative_multiplier
+
+        # Request tracking for breaks
+        self.request_count = 0
+        self.next_break_at = self._calculate_next_break()
+
+        # Log configuration
+        if conservative_mode:
+            logger.info("Conservative mode ACTIVE - delays doubled, breaks more frequent")
+        logger.debug(
+            f"Rate limiting: detail={self.rate_limit_detail:.1f}s, search={self.rate_limit_search:.1f}s, "
+            f"jitter=±{self.rate_limit_jitter:.1f}s"
+        )
+        logger.debug(
+            f"Breaks: every ~{self.break_after_requests}±{self.break_after_jitter} requests, "
+            f"duration ~{self.break_duration:.0f}±{self.break_jitter:.0f}s"
+        )
 
         # Log authentication mode
         if aura_token:
@@ -57,6 +126,30 @@ class HallmarkAPIClient:
             aura_context=aura_context or '',
             fwuid=fwuid or ''
         )
+
+    def _calculate_next_break(self) -> int:
+        """Calculate the request count at which to take the next break."""
+        jitter = random.randint(-self.break_after_jitter, self.break_after_jitter)
+        return self.request_count + self.break_after_requests + jitter
+
+    def _check_and_take_break(self) -> None:
+        """Check if it's time for a break and take one if needed."""
+        if self.request_count >= self.next_break_at:
+            # Calculate break duration with jitter
+            jitter = random.uniform(-self.break_jitter, self.break_jitter)
+            break_duration = max(1, self.break_duration + jitter)
+
+            logger.info(f"Taking a break ({break_duration:.0f}s)... processed {self.request_count} requests so far")
+
+            # Call the callback if provided
+            if self.on_break_callback:
+                self.on_break_callback(self.request_count, break_duration)
+
+            time.sleep(break_duration)
+
+            # Reset for next break
+            self.next_break_at = self._calculate_next_break()
+            logger.debug(f"Break complete. Next break at ~{self.next_break_at} requests")
 
     def get_order_detail(self, order_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve order detail from Hallmark Connect.
@@ -182,11 +275,12 @@ class HallmarkAPIClient:
             page_number=page_number
         )
 
-        # Execute with retry logic
+        # Execute with retry logic (search requests use longer timeout)
         response_data = self._execute_request(
             url=request_spec['url'],
             headers=request_spec['headers'],
-            data=request_spec['data']
+            data=request_spec['data'],
+            request_type=RequestType.SEARCH
         )
 
         if response_data is None:
@@ -221,11 +315,12 @@ class HallmarkAPIClient:
             end_date=end_date
         )
 
-        # Execute with retry logic
+        # Execute with retry logic (search requests use longer timeout)
         response_data = self._execute_request(
             url=request_spec['url'],
             headers=request_spec['headers'],
-            data=request_spec['data']
+            data=request_spec['data'],
+            request_type=RequestType.SEARCH
         )
 
         if response_data is None:
@@ -239,7 +334,8 @@ class HallmarkAPIClient:
         self,
         url: str,
         headers: Dict[str, str],
-        data: Dict[str, str]
+        data: Dict[str, str],
+        request_type: str = RequestType.DETAIL
     ) -> Optional[Dict[str, Any]]:
         """Execute HTTP request with retry logic and rate limiting.
 
@@ -247,12 +343,19 @@ class HallmarkAPIClient:
             url: Request URL
             headers: Request headers
             data: Form data
+            request_type: Type of request (RequestType.DETAIL or RequestType.SEARCH)
 
         Returns:
             Response JSON data, or None if request fails
         """
-        # Apply rate limiting
-        self._apply_rate_limit()
+        # Check if we need a break before this request
+        self._check_and_take_break()
+
+        # Apply rate limiting with appropriate delay for request type
+        self._apply_rate_limit(request_type)
+
+        # Select timeout based on request type
+        timeout = self.search_timeout if request_type == RequestType.SEARCH else self.request_timeout
 
         # Retry loop
         for attempt in range(self.max_retries):
@@ -263,11 +366,12 @@ class HallmarkAPIClient:
                     url=url,
                     headers=headers,
                     data=data,
-                    timeout=30
+                    timeout=timeout
                 )
 
-                # Update last request time
+                # Update last request time and increment count
                 self.last_request_time = time.time()
+                self.request_count += 1
 
                 # Check for HTTP errors
                 if response.status_code == 200:
@@ -306,7 +410,7 @@ class HallmarkAPIClient:
                     response.raise_for_status()
 
             except requests.Timeout:
-                logger.warning(f"Request timeout, attempt {attempt + 1}/{self.max_retries}")
+                logger.warning(f"Request timeout ({timeout}s), attempt {attempt + 1}/{self.max_retries}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue
@@ -367,16 +471,26 @@ class HallmarkAPIClient:
             logger.error(f"Unknown action state '{state}' for order {order_id}")
             return None
 
-    def _apply_rate_limit(self) -> None:
+    def _apply_rate_limit(self, request_type: str = RequestType.DETAIL) -> None:
         """Apply rate limiting by waiting if necessary.
 
-        Ensures minimum delay between requests to avoid overwhelming the server.
+        Ensures minimum delay between requests with random jitter to look more human.
+
+        Args:
+            request_type: Type of request to determine appropriate delay
         """
         if self.last_request_time is None:
             return
 
+        # Select base delay based on request type
+        base_delay = self.rate_limit_search if request_type == RequestType.SEARCH else self.rate_limit_detail
+
+        # Add random jitter to make timing look more human
+        jitter = random.uniform(0, self.rate_limit_jitter)
+        target_delay = base_delay + jitter
+
         elapsed = time.time() - self.last_request_time
-        if elapsed < self.rate_limit_seconds:
-            wait_time = self.rate_limit_seconds - elapsed
-            logger.debug(f"Rate limiting: waiting {wait_time:.2f} seconds")
+        if elapsed < target_delay:
+            wait_time = target_delay - elapsed
+            logger.debug(f"Rate limiting ({request_type}): waiting {wait_time:.2f}s (base: {base_delay:.1f}s + jitter: {jitter:.2f}s)")
             time.sleep(wait_time)
