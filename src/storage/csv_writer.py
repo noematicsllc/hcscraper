@@ -174,3 +174,78 @@ class CSVWriter:
                 rows.append(row)
 
         return rows
+
+    def save_delivery(self, delivery_id: str, delivery_data: Dict[str, Any]) -> Path:
+        """Save delivery data to CSV file (flattened format).
+
+        Args:
+            delivery_id: The delivery ID
+            delivery_data: The delivery data to save
+
+        Returns:
+            Path to the saved file
+
+        Raises:
+            IOError: If file write fails
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"delivery_{delivery_id}_{timestamp}.csv"
+        filepath = self.output_directory / filename
+
+        try:
+            # Extract line items if available
+            rows = self._flatten_delivery_data(delivery_id, delivery_data)
+
+            if not rows:
+                logger.warning(f"No data to write for delivery {delivery_id}")
+                return filepath
+
+            # Write CSV
+            with open(filepath, 'w', newline='', encoding='utf-8') as f:
+                if rows:
+                    writer = csv.DictWriter(f, fieldnames=rows[0].keys())
+                    writer.writeheader()
+                    writer.writerows(rows)
+
+            logger.info(f"Saved delivery {delivery_id} to {filepath}")
+            return filepath
+
+        except IOError as e:
+            logger.error(f"Failed to write CSV file {filepath}: {e}")
+            raise
+
+    def _flatten_delivery_data(self, delivery_id: str, delivery_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Flatten delivery data into CSV rows.
+
+        Args:
+            delivery_id: The delivery ID
+            delivery_data: The delivery data
+
+        Returns:
+            List of dicts representing CSV rows
+        """
+        rows = []
+
+        if isinstance(delivery_data, dict):
+            # If there are line items, create one row per item
+            line_items = delivery_data.get('lineItems', delivery_data.get('items', []))
+
+            if line_items and isinstance(line_items, list):
+                for item in line_items:
+                    if isinstance(item, dict):
+                        row = {
+                            'delivery_id': delivery_id,
+                            'extracted_at': datetime.now().isoformat(),
+                            **item
+                        }
+                        rows.append(row)
+            else:
+                # No line items, just save delivery-level data
+                row = {
+                    'delivery_id': delivery_id,
+                    'extracted_at': datetime.now().isoformat(),
+                    **delivery_data
+                }
+                rows.append(row)
+
+        return rows

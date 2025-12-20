@@ -120,6 +120,37 @@ class HallmarkAPIClient:
         # Parse Aura response
         return self._parse_aura_response(response_data, billing_document_id)
 
+    def get_delivery_detail(self, delivery_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve delivery detail from Hallmark Connect.
+
+        Args:
+            delivery_id: The delivery ID to retrieve
+
+        Returns:
+            Dict containing delivery data, or None if request fails
+
+        Raises:
+            requests.RequestException: If all retry attempts fail
+        """
+        logger.info(f"Retrieving delivery detail for {delivery_id}")
+
+        # Build request
+        request_spec = self.request_builder.build_delivery_detail_request(delivery_id)
+
+        # Execute with retry logic
+        response_data = self._execute_request(
+            url=request_spec['url'],
+            headers=request_spec['headers'],
+            data=request_spec['data']
+        )
+
+        if response_data is None:
+            logger.error(f"Failed to retrieve delivery {delivery_id}")
+            return None
+
+        # Parse Aura response
+        return self._parse_aura_response(response_data, delivery_id)
+
     def _execute_request(
         self,
         url: str,

@@ -103,6 +103,46 @@ class AuraRequestBuilder:
             page_uri=f"/s/billingdocumentdetail?billingDocumentId={billing_document_id}"
         )
 
+    def build_delivery_detail_request(self, delivery_id: str) -> Dict[str, Any]:
+        """Build request for delivery detail retrieval.
+
+        Args:
+            delivery_id: The delivery ID to retrieve
+
+        Returns:
+            Dict with 'url', 'headers', and 'data' for the request
+        """
+        # Build action payload following the same pattern as orders/billing
+        action_payload = {
+            "actions": [{
+                "id": "761;a",
+                "descriptor": "aura://ApexActionController/ACTION$execute",
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "namespace": "",
+                    "classname": "Portal_DeliveryDetailController",
+                    "method": "getDeliveryDetailSAPSearchResult",
+                    "params": {
+                        "pageSize": -1,
+                        "pageNumber": -1,
+                        "searchSort": json.dumps([
+                            {"columnName": "cartonNumber", "sortorder": "asc", "priority": 1},
+                            {"columnName": "serialCartonContainerCode", "sortorder": "Desc", "priority": 2},
+                            {"columnName": "cartonValue", "sortorder": "Desc", "priority": 3}
+                        ]),
+                        "deliveryId": delivery_id,
+                        "cacheable": False,
+                        "isContinuation": False
+                    }
+                }
+            }]
+        }
+
+        return self._build_request(
+            message=action_payload,
+            page_uri=f"/s/deliverydetail?deliveryId={delivery_id}"
+        )
+
     def _build_request(self, message: Dict[str, Any], page_uri: str) -> Dict[str, Any]:
         """Build generic Aura API request.
 

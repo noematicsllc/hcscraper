@@ -91,3 +91,38 @@ class JSONWriter:
         except IOError as e:
             logger.error(f"Failed to write JSON file {filepath}: {e}")
             raise
+
+    def save_delivery(self, delivery_id: str, delivery_data: Dict[str, Any]) -> Path:
+        """Save delivery data to JSON file.
+
+        Args:
+            delivery_id: The delivery ID
+            delivery_data: The delivery data to save
+
+        Returns:
+            Path to the saved file
+
+        Raises:
+            IOError: If file write fails
+        """
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"delivery_{delivery_id}_{timestamp}.json"
+        filepath = self.output_directory / filename
+
+        # Wrap data with metadata
+        output = {
+            "delivery_id": delivery_id,
+            "extracted_at": datetime.now().isoformat(),
+            "data": delivery_data
+        }
+
+        try:
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(output, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"Saved delivery {delivery_id} to {filepath}")
+            return filepath
+
+        except IOError as e:
+            logger.error(f"Failed to write JSON file {filepath}: {e}")
+            raise
