@@ -85,15 +85,70 @@ class Config:
         """Logging level."""
         return os.getenv("LOG_LEVEL", "INFO").upper()
 
+    # Timeout settings
+    @property
+    def request_timeout_seconds(self) -> float:
+        """Timeout for regular detail requests."""
+        return float(os.getenv("REQUEST_TIMEOUT_SECONDS", "30"))
+
+    @property
+    def search_timeout_seconds(self) -> float:
+        """Timeout for search requests (which take longer)."""
+        return float(os.getenv("SEARCH_TIMEOUT_SECONDS", "120"))
+
+    # Rate limiting settings
     @property
     def rate_limit_seconds(self) -> float:
-        """Seconds to wait between API requests."""
+        """Seconds to wait between API requests (deprecated, use rate_limit_detail_seconds)."""
         return float(os.getenv("RATE_LIMIT_SECONDS", "2.5"))
+
+    @property
+    def rate_limit_detail_seconds(self) -> float:
+        """Seconds to wait between detail requests."""
+        return float(os.getenv("RATE_LIMIT_DETAIL_SECONDS", os.getenv("RATE_LIMIT_SECONDS", "2.5")))
+
+    @property
+    def rate_limit_search_seconds(self) -> float:
+        """Seconds to wait between search requests."""
+        return float(os.getenv("RATE_LIMIT_SEARCH_SECONDS", "5.0"))
+
+    @property
+    def rate_limit_jitter_seconds(self) -> float:
+        """Random jitter to add to rate limits (makes timing look more human)."""
+        return float(os.getenv("RATE_LIMIT_JITTER_SECONDS", "0.5"))
 
     @property
     def max_retries(self) -> int:
         """Maximum number of retry attempts for failed requests."""
         return int(os.getenv("MAX_RETRIES", "3"))
+
+    # Break settings (periodic pauses)
+    @property
+    def break_after_requests(self) -> int:
+        """Number of requests before taking a break."""
+        return int(os.getenv("BREAK_AFTER_REQUESTS", "25"))
+
+    @property
+    def break_after_jitter(self) -> int:
+        """Random jitter for break interval (requests ± jitter)."""
+        return int(os.getenv("BREAK_AFTER_JITTER", "5"))
+
+    @property
+    def break_duration_seconds(self) -> float:
+        """Base duration of breaks in seconds."""
+        return float(os.getenv("BREAK_DURATION_SECONDS", "60"))
+
+    @property
+    def break_jitter_seconds(self) -> float:
+        """Random jitter for break duration (duration ± jitter)."""
+        return float(os.getenv("BREAK_JITTER_SECONDS", "15"))
+
+    # Conservative mode
+    @property
+    def conservative_mode(self) -> bool:
+        """Enable conservative mode (doubles delays, halves requests between breaks)."""
+        value = os.getenv("CONSERVATIVE_MODE", "false").lower()
+        return value in ("true", "1", "yes")
 
     @property
     def headless_mode(self) -> bool:
