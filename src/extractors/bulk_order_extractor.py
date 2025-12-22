@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Union
 
 from ..api.client import HallmarkAPIClient
-from ..utils.config import BANNER_HALLMARK_CUSTOMER_IDS
+from ..utils.config import BANNER_HALLMARK_CUSTOMER_IDS, DEFAULT_MAX_CONSECUTIVE_FAILURES
 from .order_extractor import OrderExtractor
 
 
@@ -21,7 +21,8 @@ class BulkOrderExtractor:
         output_directory: Path,
         customer_ids: Optional[Union[List[str], str]] = None,
         save_json: bool = True,
-        save_csv: bool = True
+        update_mode: bool = False,
+        max_consecutive_failures: int = DEFAULT_MAX_CONSECUTIVE_FAILURES
     ):
         """Initialize bulk order extractor.
 
@@ -30,12 +31,14 @@ class BulkOrderExtractor:
             output_directory: Directory for output files
             customer_ids: Customer IDs to search for (default: Banner's Hallmark stores)
             save_json: Whether to save JSON files (default: True)
-            save_csv: Whether to save CSV files (default: True)
+            update_mode: If True, re-download existing files. If False, skip existing files (default: False)
+            max_consecutive_failures: Maximum consecutive failures before stopping (default: DEFAULT_MAX_CONSECUTIVE_FAILURES)
         """
         self.api_client = api_client
         self.output_directory = Path(output_directory)
         self.save_json = save_json
-        self.save_csv = save_csv
+        self.update_mode = update_mode
+        self.max_consecutive_failures = max_consecutive_failures
 
         # Use Banner's Hallmark customer IDs as default
         if customer_ids is None:
@@ -50,7 +53,8 @@ class BulkOrderExtractor:
             api_client=api_client,
             output_directory=output_directory,
             save_json=save_json,
-            save_csv=save_csv
+            update_mode=update_mode,
+            max_consecutive_failures=max_consecutive_failures
         )
 
     def search_orders(
@@ -238,3 +242,20 @@ class BulkOrderExtractor:
             "total_orders": total_records,
             "customer_ids_count": len(self.customer_ids)
         }
+
+    def close(self) -> None:
+        """Close database connection in the internal order extractor.
+        
+        Should be called when done with the extractor to prevent connection leaks.
+        """
+        if hasattr(self, 'order_extractor'):
+            self.order_extractor.close()
+
+    def __enter__(self):
+        """Context manager entry - returns self."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit - closes database connection."""
+        self.close()
+        return False  # Don't suppress exceptions

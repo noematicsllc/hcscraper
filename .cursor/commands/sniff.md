@@ -1,0 +1,1 @@
+Review the code and find 3 code smells. Explain them and suggest solutions for addressing them.

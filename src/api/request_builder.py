@@ -285,10 +285,10 @@ class AuraRequestBuilder:
             {"columnName": "orderId", "sortorder": "Desc", "priority": 3}
         ])
 
-        # Build action payload
+        # Build action payload (matching format from actual Hallmark Connect requests)
         action_payload = {
             "actions": [{
-                "id": "761;a",
+                "id": "324;a",
                 "descriptor": "aura://ApexActionController/ACTION$execute",
                 "callingDescriptor": "UNKNOWN",
                 "params": {
@@ -300,7 +300,9 @@ class AuraRequestBuilder:
                         "pageNumber": page_number,
                         "searchFilters": search_filters,
                         "searchSort": search_sort,
-                        "searchType": "Orders"
+                        "searchType": "Orders",
+                        "cacheable": False,
+                        "isContinuation": False
                     }
                 }
             }]
@@ -341,10 +343,10 @@ class AuraRequestBuilder:
             "orderCreationEndDate": end_date
         })
 
-        # Build action payload
+        # Build action payload (matching format from actual Hallmark Connect requests)
         action_payload = {
             "actions": [{
-                "id": "761;a",
+                "id": "325;a",
                 "descriptor": "aura://ApexActionController/ACTION$execute",
                 "callingDescriptor": "UNKNOWN",
                 "params": {
@@ -352,7 +354,9 @@ class AuraRequestBuilder:
                     "classname": "Portal_OrderController",
                     "method": "constructSearchFilterRequest",
                     "params": {
-                        "searchFilters": search_filters
+                        "searchFilters": search_filters,
+                        "cacheable": False,
+                        "isContinuation": False
                     }
                 }
             }]

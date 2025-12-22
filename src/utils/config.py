@@ -19,6 +19,9 @@ BANNER_HALLMARK_CUSTOMER_IDS: List[str] = [
     "1000020145"
 ]
 
+# Default maximum consecutive failures before stopping extraction
+DEFAULT_MAX_CONSECUTIVE_FAILURES: int = 3
+
 
 class Config:
     """Application configuration loaded from environment variables."""
@@ -155,6 +158,12 @@ class Config:
         """Run browser in headless mode."""
         value = os.getenv("HEADLESS_MODE", "false").lower()
         return value in ("true", "1", "yes")
+
+    @property
+    def session_file(self) -> Path:
+        """Path to session file for Playwright state persistence."""
+        path_str = os.getenv("SESSION_FILE", "./hallmark_session.json")
+        return Path(path_str)
 
     def validate(self) -> bool:
         """Validate that all required configuration is present.

@@ -1,29 +1,55 @@
-version: '3.8'
-
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: hcscraper-postgres
+    environment:
+      POSTGRES_USER: hallmark
+      POSTGRES_PASSWORD: hallmark
+      POSTGRES_DB: hallmark_orders
+    volumes:
+      # Persist database data on host
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Expose PostgreSQL port to host (optional, for external access)
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hallmark"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   hcscraper:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: hcscraper
+    depends_on:
+      postgres:
+        condition: service_healthy
     volumes:
       # Mount data directory so downloaded files are accessible on host
       - ./data:/app/data
-      # Mount reports directory for profiling reports
-      - ./reports:/app/reports
-      # Mount session file for persistence across container restarts (optional, created if missing)
-      - ./hallmark_session.json:/app/hallmark_session.json
+      # Mount session directory for persistence across container restarts
+      # Note: session file will be created inside this directory
+      - ./sessions:/app/sessions
       # Mount .env file (make sure it exists on host)
       - ./.env:/app/.env:ro
-      # Optional: mount order files if you have them
-      # - ./orders.txt:/app/orders.txt:ro
+      # Mount search results directory for CSV-based order extraction
+      - ./search_results:/app/search_results:ro
     environment:
       # Override OUTPUT_DIRECTORY to use mounted volume
       - OUTPUT_DIRECTORY=/app/data
-    # Keep container running (remove if you want it to exit after command)
-    stdin_open: true
-    tty: true
-    # Run interactively to handle MFA input if needed
-    # Remove this if using headless mode or webhook MFA
-    # command: python main.py --headless --order-id 3076428648
+      # Session file path inside the mounted sessions directory
+      - SESSION_FILE=/app/sessions/hallmark_session.json
+      # Default database URL (can be overridden in .env)
+      - DATABASE_URL=postgresql://hallmark:hallmark@postgres:5432/hallmark_orders
+    # Interactive mode settings (enables MFA input and real-time progress display)
+    stdin_open: true  # Allows input (for MFA codes)
+    tty: true         # Allocates pseudo-TTY (for formatted output and progress)
+    # Note: When using 'docker compose run', use -it flags for explicit interactive mode
+    # The stdin_open and tty settings help, but -it is more reliable
+    # Example: docker compose run --rm -it hcscraper python main.py --order-id 123
+
+volumes:
+  postgres_data:
 

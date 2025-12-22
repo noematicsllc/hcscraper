@@ -23,6 +23,8 @@ class HallmarkAPIClient:
 
     # HTTP status codes that should trigger retry
     RETRY_STATUS_CODES = {429, 500, 502, 503, 504}
+    # HTTP status codes that indicate session expiration
+    SESSION_EXPIRED_CODES = {401, 403}
 
     def __init__(
         self,
@@ -48,7 +50,9 @@ class HallmarkAPIClient:
         # Conservative mode
         conservative_mode: bool = False,
         # Callbacks
-        on_break_callback: Optional[Callable[[int, float], None]] = None
+        on_break_callback: Optional[Callable[[int, float], None]] = None,
+        # Session refresh callback
+        on_session_expired: Optional[Callable[[], bool]] = None
     ):
         """Initialize API client.
 
@@ -77,6 +81,8 @@ class HallmarkAPIClient:
         self.max_retries = max_retries
         self.last_request_time: Optional[float] = None
         self.on_break_callback = on_break_callback
+        self.on_session_expired = on_session_expired
+        self._session_refresh_attempted = False
 
         # Apply conservative mode multipliers
         conservative_multiplier = 2.0 if conservative_mode else 1.0
@@ -375,8 +381,72 @@ class HallmarkAPIClient:
 
                 # Check for HTTP errors
                 if response.status_code == 200:
-                    logger.debug(f"Request successful (200 OK)")
-                    return response.json()
+                    # Check if response has content before trying to parse JSON
+                    if not response.content or len(response.content) == 0:
+                        logger.error(f"Empty response body (status 200)")
+                        logger.debug(f"Response headers: {dict(response.headers)}")
+                        if attempt < self.max_retries - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        return None
+                    
+                    try:
+                        result = response.json()
+                        logger.debug(f"Request successful (200 OK)")
+                        return result
+                    except requests.exceptions.JSONDecodeError as json_error:
+                        logger.error(f"Invalid JSON in response: {json_error}")
+                        logger.debug(f"Response content (first 500 chars): {response.text[:500]}")
+                        if attempt < self.max_retries - 1:
+                            time.sleep(2 ** attempt)
+                            continue
+                        return None
+
+                elif response.status_code in self.SESSION_EXPIRED_CODES:
+                    # Session expired - try to refresh session
+                    logger.warning(
+                        f"Session expired (status {response.status_code}), "
+                        f"attempt {attempt + 1}/{self.max_retries}"
+                    )
+                    
+                    # Check if response indicates login redirect
+                    response_text = response.text.lower()
+                    is_login_redirect = (
+                        '/login' in response.url.lower() or
+                        'login' in response_text[:500] or
+                        'authentication' in response_text[:500] or
+                        'unauthorized' in response_text[:500]
+                    )
+                    
+                    if is_login_redirect or response.status_code == 401:
+                        # Try to refresh session if callback provided and not already attempted
+                        if self.on_session_expired and not self._session_refresh_attempted:
+                            logger.info("Attempting to refresh session...")
+                            self._session_refresh_attempted = True
+                            if self.on_session_expired():
+                                logger.info("Session refreshed successfully, retrying request")
+                                self._session_refresh_attempted = False
+                                continue
+                            else:
+                                logger.error("Session refresh failed")
+                                # Don't retry if refresh failed
+                                return None
+                        elif self._session_refresh_attempted:
+                            logger.error("Session refresh already attempted, giving up")
+                            return None
+                        else:
+                            logger.error("No session refresh callback available")
+                            return None
+                    
+                    # For 403, might be permission issue rather than session expiry
+                    if response.status_code == 403:
+                        logger.error(f"Access forbidden (403): {response.text[:200]}")
+                        if attempt < self.max_retries - 1:
+                            backoff_time = 2 ** attempt
+                            logger.debug(f"Backing off for {backoff_time} seconds")
+                            time.sleep(backoff_time)
+                            continue
+                        return None
 
                 elif response.status_code in self.RETRY_STATUS_CODES:
                     # Retryable error
@@ -420,6 +490,10 @@ class HallmarkAPIClient:
 
             except requests.RequestException as e:
                 logger.error(f"Request failed: {e}")
+                # Log request details for debugging
+                logger.debug(f"Request URL: {url}")
+                logger.debug(f"Request headers: {headers}")
+                logger.debug(f"Request data keys: {list(data.keys())}")
                 if attempt < self.max_retries - 1:
                     time.sleep(2 ** attempt)
                     continue

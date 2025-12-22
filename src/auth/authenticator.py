@@ -422,22 +422,40 @@ class HallmarkAuthenticator:
             if aura_tokens:
                 return aura_tokens
 
-            # Method 7: If we still don't have Aura tokens but have session_id + fwuid,
-            # that's sufficient for authenticated requests - Aura tokens are optional
-            session_id = url_tokens.get('session_id', '')
+            # Method 7: Last resort - try to extract token from page source HTML
+            # This is a fallback when JavaScript methods fail
+            logger.warning("  All JavaScript extraction methods failed, trying deep page source scan...")
+            page_source_tokens = self._extract_tokens_from_page_source(page)
+            if page_source_tokens and page_source_tokens.get("token"):
+                logger.info("  ✓ Successfully extracted tokens from page source")
+                if url_tokens:
+                    page_source_tokens['session_id'] = url_tokens.get('session_id', '')
+                    page_source_tokens['org_id'] = url_tokens.get('org_id', '')
+                return page_source_tokens
+
+            # Method 8: CRITICAL - Do NOT allow empty tokens
+            # The Salesforce Aura API requires a valid aura.token field.
+            # Empty tokens cause the API to return empty responses (status 200, empty body).
+            # We must fail authentication if we cannot extract a token.
+            session_id = url_tokens.get('session_id', '') if url_tokens else None
             fwuid = self._extract_fwuid_from_page(page)
-
+            
             if session_id:
-                logger.info("  ✓ Using session ID authentication (Aura tokens optional)")
-                return {
-                    'token': '',  # Empty is OK - will use session cookie
-                    'context': '',  # Empty is OK - will build minimal context
-                    'fwuid': fwuid or '',
-                    'session_id': session_id,
-                    'org_id': url_tokens.get('org_id', '')
-                }
+                logger.error(
+                    "  ✗ CRITICAL: Cannot extract Aura token but have session ID. "
+                    "The API requires a valid aura.token - empty tokens will cause API failures. "
+                    "Authentication cannot proceed without a valid token."
+                )
+                logger.error(
+                    "  Available: session_id={}, fwuid={}, but missing required aura.token".format(
+                        session_id[:20] + "..." if session_id and len(session_id) > 20 else session_id,
+                        fwuid[:20] + "..." if fwuid and len(fwuid) > 20 else fwuid
+                    )
+                )
+            else:
+                logger.error("  ✗ CRITICAL: Cannot extract Aura token and no session ID available")
 
-        logger.error("All token extraction methods failed")
+        logger.error("All token extraction methods failed - authentication cannot proceed without Aura token")
         return None
 
     def _extract_fwuid_from_page(self, page: Page) -> Optional[str]:
@@ -795,9 +813,12 @@ class HallmarkAuthenticator:
         self._log_aura_properties(page)
 
         # Try multiple extraction methods in order of preference
+        # Start with safest optional chaining methods first
         methods = [
+            ("$A?.getContext?.()?.getToken?.() (safe)", self._extract_via_safe_context_getToken),
             ("$A.getToken()", self._extract_via_getToken),
             ("$A.getContext().getToken()", self._extract_via_context_getToken),
+            ("$A.get('$Storage')", self._extract_via_storage_get),
             ("Aura.token property", self._extract_via_aura_token_property),
             ("Window Aura object", self._extract_via_window_aura),
             ("$A.storageService", self._extract_via_storage_service),
@@ -811,9 +832,12 @@ class HallmarkAuthenticator:
                     logger.info(f"  ✓ Successfully extracted tokens via: {method_name}")
                     return result
                 else:
-                    logger.debug(f"  Method {method_name} returned no token")
+                    if result and result.get("error"):
+                        logger.warning(f"  Method {method_name} error: {result['error']}")
+                    else:
+                        logger.debug(f"  Method {method_name} returned no token")
             except Exception as e:
-                logger.debug(f"  Method {method_name} failed: {e}")
+                logger.error(f"  Method {method_name} exception: {e}", exc_info=True)
 
         logger.warning("All JavaScript Aura extraction methods failed")
         return None
@@ -936,6 +960,85 @@ class HallmarkAuthenticator:
         except Exception as e:
             logger.warning(f"  Error logging Aura properties: {e}")
 
+    def _extract_via_safe_context_getToken(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract token using safe optional chaining: $A?.getContext?.()?.getToken?.()
+
+        This is the safest method that won't throw if any part of the chain is undefined.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens or None
+        """
+        result = page.evaluate("""
+            () => {
+                try {
+                    // Use safe optional chaining - won't throw if any part is undefined
+                    const token = window.$A?.getContext?.()?.getToken?.();
+                    
+                    if (!token || typeof token !== 'string') {
+                        return { error: 'Safe optional chaining returned no valid token' };
+                    }
+
+                    let context = null;
+                    let fwuid = null;
+
+                    // Try to get context and fwuid safely
+                    try {
+                        const ctx = window.$A?.getContext?.();
+                        if (ctx) {
+                            // Try encodeForServer
+                            if (typeof ctx.encodeForServer === 'function') {
+                                try {
+                                    context = ctx.encodeForServer();
+                                } catch (e) {
+                                    // Try JSON.stringify as fallback
+                                    try {
+                                        context = JSON.stringify(ctx);
+                                    } catch (e2) {
+                                        // Ignore encoding errors
+                                    }
+                                }
+                            }
+                            // Get fwuid
+                            if (ctx.fwuid) {
+                                fwuid = ctx.fwuid;
+                            }
+                        }
+                    } catch (e) {
+                        // Context extraction failed, but we have token
+                    }
+
+                    return {
+                        token: token,
+                        context: context,
+                        fwuid: fwuid
+                    };
+                } catch (e) {
+                    return { 
+                        error: `Safe extraction failed: ${e.message || String(e)}`,
+                        stack: e.stack || ''
+                    };
+                }
+            }
+        """)
+
+        if result and result.get("error"):
+            error_msg = result['error']
+            if result.get("stack"):
+                error_msg += f" (stack: {result['stack']})"
+            logger.warning(f"  _extract_via_safe_context_getToken error: {error_msg}")
+            return None
+
+        if result and result.get("token"):
+            return {
+                "token": result["token"],
+                "context": result.get("context") or "",
+                "fwuid": result.get("fwuid") or ""
+            }
+        return None
+
     def _extract_via_getToken(self, page: Page) -> Optional[Dict[str, str]]:
         """Extract token using $A.getToken() method.
 
@@ -995,13 +1098,19 @@ class HallmarkAuthenticator:
                         fwuid: fwuid
                     };
                 } catch (e) {
-                    return { error: e.message || String(e) };
+                    return { 
+                        error: `$A.getToken() failed: ${e.message || String(e)}`,
+                        stack: e.stack || ''
+                    };
                 }
             }
         """)
 
         if result and result.get("error"):
-            logger.debug(f"  _extract_via_getToken error: {result['error']}")
+            error_msg = result['error']
+            if result.get("stack"):
+                error_msg += f" (stack: {result['stack']})"
+            logger.warning(f"  _extract_via_getToken error: {error_msg}")
             return None
 
         if result and result.get("token"):
@@ -1068,13 +1177,19 @@ class HallmarkAuthenticator:
                         fwuid: fwuid
                     };
                 } catch (e) {
-                    return { error: e.message || String(e) };
+                    return { 
+                        error: `$A.getContext().getToken() failed: ${e.message || String(e)}`,
+                        stack: e.stack || ''
+                    };
                 }
             }
         """)
 
         if result and result.get("error"):
-            logger.debug(f"  _extract_via_context_getToken error: {result['error']}")
+            error_msg = result['error']
+            if result.get("stack"):
+                error_msg += f" (stack: {result['stack']})"
+            logger.warning(f"  _extract_via_context_getToken error: {error_msg}")
             return None
 
         if result and result.get("token"):
@@ -1128,13 +1243,19 @@ class HallmarkAuthenticator:
                         fwuid: fwuid
                     };
                 } catch (e) {
-                    return { error: e.message || String(e) };
+                    return { 
+                        error: `Aura.token property extraction failed: ${e.message || String(e)}`,
+                        stack: e.stack || ''
+                    };
                 }
             }
         """)
 
         if result and result.get("error"):
-            logger.debug(f"  _extract_via_aura_token_property error: {result['error']}")
+            error_msg = result['error']
+            if result.get("stack"):
+                error_msg += f" (stack: {result['stack']})"
+            logger.warning(f"  _extract_via_aura_token_property error: {error_msg}")
             return None
 
         if result and result.get("token"):
@@ -1176,13 +1297,103 @@ class HallmarkAuthenticator:
 
                     return { error: 'No token found in window Aura objects' };
                 } catch (e) {
-                    return { error: e.message || String(e) };
+                    return { 
+                        error: `Window Aura object extraction failed: ${e.message || String(e)}`,
+                        stack: e.stack || ''
+                    };
                 }
             }
         """)
 
         if result and result.get("error"):
-            logger.debug(f"  _extract_via_window_aura error: {result['error']}")
+            error_msg = result['error']
+            if result.get("stack"):
+                error_msg += f" (stack: {result['stack']})"
+            logger.warning(f"  _extract_via_window_aura error: {error_msg}")
+            return None
+
+        if result and result.get("token"):
+            return {
+                "token": result["token"],
+                "context": result.get("context") or "",
+                "fwuid": result.get("fwuid") or ""
+            }
+        return None
+
+    def _extract_via_storage_get(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract token using $A.get("$Storage") method.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with tokens or None
+        """
+        result = page.evaluate("""
+            () => {
+                try {
+                    if (!window.$A) {
+                        return { error: '$A not defined' };
+                    }
+
+                    // Try $A.get("$Storage") - safer with optional chaining
+                    if (typeof window.$A.get === 'function') {
+                        try {
+                            const storage = window.$A.get("$Storage");
+                            if (storage && typeof storage === 'object') {
+                                // Look for token-related keys
+                                const keys = Object.keys(storage);
+                                for (const key of keys) {
+                                    if (key.toLowerCase().includes('token')) {
+                                        const value = storage[key];
+                                        if (value && typeof value === 'string' && value.length > 10) {
+                                            // Also try to get context and fwuid
+                                            let context = null;
+                                            let fwuid = null;
+                                            
+                                            // Try to get context from storage
+                                            if (storage.context) {
+                                                try {
+                                                    context = typeof storage.context === 'string' 
+                                                        ? storage.context 
+                                                        : JSON.stringify(storage.context);
+                                                } catch (e) {}
+                                            }
+                                            
+                                            // Try to get fwuid
+                                            if (storage.fwuid) {
+                                                fwuid = storage.fwuid;
+                                            }
+                                            
+                                            return { 
+                                                token: value, 
+                                                context: context, 
+                                                fwuid: fwuid 
+                                            };
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (e) {
+                            return { error: `$A.get("$Storage") failed: ${e.message || String(e)}` };
+                        }
+                    }
+
+                    return { error: '$A.get is not a function or storage not found' };
+                } catch (e) {
+                    return { 
+                        error: `Storage get extraction failed: ${e.message || String(e)}`,
+                        stack: e.stack || ''
+                    };
+                }
+            }
+        """)
+
+        if result and result.get("error"):
+            error_msg = result['error']
+            if result.get("stack"):
+                error_msg += f" (stack: {result['stack']})"
+            logger.warning(f"  _extract_via_storage_get error: {error_msg}")
             return None
 
         if result and result.get("token"):
@@ -1209,25 +1420,6 @@ class HallmarkAuthenticator:
                         return { error: '$A not defined' };
                     }
 
-                    // Try $A.get("$Storage")
-                    if (typeof window.$A.get === 'function') {
-                        try {
-                            const storage = window.$A.get("$Storage");
-                            if (storage) {
-                                // Look for token-related keys
-                                const keys = Object.keys(storage);
-                                for (const key of keys) {
-                                    if (key.toLowerCase().includes('token')) {
-                                        const value = storage[key];
-                                        if (value && typeof value === 'string') {
-                                            return { token: value, context: null, fwuid: null };
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (e) {}
-                    }
-
                     // Try storageService
                     if (window.$A.storageService) {
                         try {
@@ -1238,18 +1430,26 @@ class HallmarkAuthenticator:
                                     return { token: storage.token, context: null, fwuid: null };
                                 }
                             }
-                        } catch (e) {}
+                        } catch (e) {
+                            return { error: `storageService.getStorage failed: ${e.message || String(e)}` };
+                        }
                     }
 
                     return { error: 'No token found in storage service' };
                 } catch (e) {
-                    return { error: e.message || String(e) };
+                    return { 
+                        error: `Storage service extraction failed: ${e.message || String(e)}`,
+                        stack: e.stack || ''
+                    };
                 }
             }
         """)
 
         if result and result.get("error"):
-            logger.debug(f"  _extract_via_storage_service error: {result['error']}")
+            error_msg = result['error']
+            if result.get("stack"):
+                error_msg += f" (stack: {result['stack']})"
+            logger.warning(f"  _extract_via_storage_service error: {error_msg}")
             return None
 
         if result and result.get("token"):
@@ -1259,6 +1459,118 @@ class HallmarkAuthenticator:
                 "fwuid": result.get("fwuid") or ""
             }
         return None
+
+    def _extract_tokens_from_page_source(self, page: Page) -> Optional[Dict[str, str]]:
+        """Extract tokens from page source HTML with comprehensive scanning.
+
+        This method does a deep scan of the page source looking for tokens in
+        various locations including script tags, inline JavaScript, and data attributes.
+
+        Args:
+            page: Playwright page object
+
+        Returns:
+            Dict with token, context, and fwuid, or None if extraction fails
+        """
+        try:
+            content = page.content()
+            logger.info("  Performing deep page source scan for Aura tokens...")
+
+            # Enhanced token patterns - more comprehensive
+            token_patterns = [
+                # JWT token patterns (most reliable for Salesforce Lightning)
+                (r'"token"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"]*)"', "JWT token in JSON"),
+                (r'token\s*[=:]\s*["\']?(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"\']*)["\']?', "JWT token assignment"),
+                # Standard aura.token patterns
+                (r'"aura\.token"\s*:\s*"([^"]+)"', "aura.token JSON"),
+                (r'aura\.token\s*=\s*["\']([^"\']+)["\']', "aura.token assignment"),
+                (r'["\']aura\.token["\']\s*:\s*["\']([^"\']+)["\']', "aura.token quoted key"),
+                # Token in context objects
+                (r'"context"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "token in context object"),
+                (r'"context"\s*:\s*\{[^}]*"fwuid"\s*:\s*"([^"]+)"[^}]*"token"\s*:\s*"([^"]+)"', "token in context with fwuid"),
+                # Token in config object (non-JWT, longer strings)
+                (r'"token"\s*:\s*"([^"]{20,200})"', "token JSON property (20-200 chars)"),
+                # Aura config patterns
+                (r'Aura\.initConfig\s*=\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "Aura.initConfig token"),
+                (r'Aura\.initConfig\s*=\s*\{[^}]*token\s*:\s*["\']([^"\']+)["\']', "Aura.initConfig token (unquoted)"),
+                # Token in appBootstrap
+                (r'"appBootstrap"[^}]*"token"\s*:\s*"([^"]+)"', "appBootstrap token"),
+                (r'appBootstrap[^}]*token\s*:\s*["\']([^"\']+)["\']', "appBootstrap token (unquoted)"),
+                # Token in script tags
+                (r'<script[^>]*>.*?"token"\s*:\s*"([^"]+)"', "token in script tag"),
+                # CSRF token patterns
+                (r'"csrfToken"\s*:\s*"([^"]+)"', "csrfToken"),
+                (r'csrfToken\s*[=:]\s*["\']([^"\']+)["\']', "csrfToken assignment"),
+                # Lightning context token
+                (r'"TOKEN"\s*:\s*"([^"]+)"', "TOKEN property"),
+                # Token in data attributes
+                (r'data-token\s*=\s*["\']([^"\']+)["\']', "data-token attribute"),
+            ]
+
+            # Enhanced fwuid patterns
+            fwuid_patterns = [
+                (r'"fwuid"\s*:\s*"([^"]+)"', "fwuid JSON"),
+                (r'fwuid\s*=\s*["\']([^"\']+)["\']', "fwuid assignment"),
+                (r'"FWUID"\s*:\s*"([^"]+)"', "FWUID property"),
+                (r'"context"\s*:\s*\{[^}]*"fwuid"\s*:\s*"([^"]+)"', "fwuid in context object"),
+            ]
+
+            # Enhanced context patterns
+            context_patterns = [
+                (r'"aura\.context"\s*:\s*(\{[^}]+\})', "aura.context JSON"),
+                (r'aura\.context\s*=\s*(\{[^}]+\})', "aura.context assignment"),
+                (r'"context"\s*:\s*(\{[^}]{50,500}\})', "context object (50-500 chars)"),
+            ]
+
+            token = None
+            fwuid = None
+            context = None
+
+            # Try each token pattern
+            for pattern, name in token_patterns:
+                match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    # Handle patterns with multiple groups (e.g., context with fwuid and token)
+                    if len(match.groups()) > 1:
+                        # Last group is usually the token
+                        token = match.group(len(match.groups()))
+                    else:
+                        token = match.group(1)
+                    
+                    if token and len(token) >= 10:  # Valid tokens are at least 10 chars
+                        logger.info(f"    Found token via pattern '{name}': {token[:50]}...")
+                        break
+
+            # Try each fwuid pattern
+            for pattern, name in fwuid_patterns:
+                match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    fwuid = match.group(1)
+                    logger.info(f"    Found fwuid via pattern '{name}': {fwuid}")
+                    break
+
+            # Try each context pattern
+            for pattern, name in context_patterns:
+                match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    context = match.group(1)
+                    logger.info(f"    Found context via pattern '{name}'")
+                    break
+
+            if token:
+                logger.info("  ✓ Successfully extracted tokens from page source")
+                return {
+                    "token": token,
+                    "context": context or "",
+                    "fwuid": fwuid or ""
+                }
+
+            logger.debug("  No token found in page source via enhanced patterns")
+            return None
+
+        except Exception as e:
+            logger.error(f"Page source extraction failed: {e}", exc_info=True)
+            return None
 
     def _extract_tokens_regex(self, page: Page) -> Optional[Dict[str, str]]:
         """Extract tokens using regex patterns from page content.
@@ -1275,12 +1587,16 @@ class HallmarkAuthenticator:
 
             # Multiple token patterns to try
             token_patterns = [
+                # JWT token pattern (most reliable for Salesforce Lightning)
+                (r'"token"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"]*)"', "JWT token in JSON"),
+                # JWT in inline assignment
+                (r'token\s*[=:]\s*["\']?(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"\']*)["\']?', "JWT token assignment"),
                 # Standard aura.token pattern
                 (r'"aura\.token"\s*:\s*"([^"]+)"', "aura.token JSON"),
                 # Token in inline script
                 (r'aura\.token\s*=\s*["\']([^"\']+)["\']', "aura.token assignment"),
-                # Token in config object
-                (r'"token"\s*:\s*"([^"]+)"', "token JSON property"),
+                # Token in config object (non-JWT)
+                (r'"token"\s*:\s*"([^"]{20,})"', "token JSON property"),
                 # Salesforce session ID pattern
                 (r'sid=([a-zA-Z0-9!]+)', "sid URL param"),
                 # CSRF token pattern
@@ -1289,6 +1605,8 @@ class HallmarkAuthenticator:
                 (r'"TOKEN"\s*:\s*"([^"]+)"', "TOKEN property"),
                 # Aura config patterns
                 (r'Aura\.initConfig\s*=\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "Aura.initConfig token"),
+                # Token in appBootstrap
+                (r'"appBootstrap"[^}]*"token"\s*:\s*"([^"]+)"', "appBootstrap token"),
             ]
 
             # Multiple fwuid patterns to try

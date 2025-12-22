@@ -1,0 +1,293 @@
+# Data Storage and Database Schema Rules
+
+## JSON File Structure
+
+### General Principles
+- **Flattened Structure**: All data fields must be at the top level of the JSON object. No nested wrappers like `data.returnValue.orderHeader`.
+- **Snake Case**: All field names must use snake_case (e.g., `order_id`, `customer_id`, `order_lines`).
+- **No Metadata Fields**: Do not include metadata fields like `extracted_at` or `extracted_by`. The file system already provides timestamps.
+- **Preserve All Data**: Never transform, truncate, or modify data from the API. Store exactly as received, only convert field names to snake_case.
+- **Exception - Store Names**: For `store_name` fields, lookup and use canonical store names from the `stores` reference table instead of the source system's store name. Original source data is preserved in `raw_data` JSONB.
+
+### Required Structure
+```json
+{
+  "{entity}_id": "12345",
+  "field_name": "value",
+  ...
+  "{entity}_lines": [
+    {
+      "line_field": "value",
+      ...
+    }
+  ]
+}
+```
+
+### Examples
+- Orders: `order_id`, `customer_id`, `store_name`, `order_lines`
+- Billing Documents: `billing_document_id`, `customer_id`, `store_name`, `billing_lines` (or similar)
+- Deliveries: `delivery_id`, `customer_id`, `store_name`, `delivery_lines` (or similar)
+
+### Implementation in `json_writer.py`
+- Use `_camel_to_snake()` to convert API field names (camelCase) to snake_case
+- Use `_convert_dict_keys_to_snake_case()` to recursively convert nested objects and arrays
+- Use `_flatten_order_data()` pattern: extract top-level fields, flatten arrays with snake_case conversion
+
+## Database Schema Design
+
+### General Principles
+- **Structured Columns**: Create typed columns for commonly queried fields (dates, IDs, amounts, statuses)
+- **raw_data JSONB**: Always include a `raw_data JSONB` column to store the complete JSON data for reference and future schema evolution
+- **Junction Tables**: Use junction tables for many-to-many relationships (e.g., `order_deliveries`, `order_billing_documents`)
+- **Foreign Keys**: Use proper foreign key constraints for referential integrity
+- **Indexes**: Create indexes on frequently queried fields and foreign keys, plus GIN indexes on JSONB columns
+
+### Table Structure Template
+```sql
+CREATE TABLE IF NOT EXISTS {entity_name} (
+    {entity}_id VARCHAR(50) PRIMARY KEY,
+    -- Structured fields (snake_case, appropriate types)
+    customer_id BIGINT,
+    store_name VARCHAR(255),
+    ...
+    -- Always include raw_data
+    raw_data JSONB
+);
+
+-- Junction tables for many-to-many relationships
+CREATE TABLE IF NOT EXISTS {parent_entity}_{related_entity} (
+    {parent_entity}_id VARCHAR(50) NOT NULL REFERENCES {parent_entity}({parent_entity}_id) ON DELETE CASCADE,
+    {related_entity}_id VARCHAR(50) NOT NULL,
+    PRIMARY KEY ({parent_entity}_id, {related_entity}_id)
+);
+
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_{entity}_customer_id ON {entity}(customer_id);
+CREATE INDEX IF NOT EXISTS idx_{entity}_raw_data ON {entity} USING GIN (raw_data);
+```
+
+### Relationship Handling
+- **One-to-Many**: Use foreign key column directly in the child table
+- **Many-to-Many**: Use junction table with composite primary key
+- **Comma-Separated Values**: When API provides comma-separated values (e.g., multiple delivery IDs), parse them and store each in a separate row in the junction table
+- **Reference Tables**: For canonical reference data (e.g., stores), create a reference table with `customer_id` as PRIMARY KEY and store internal identifiers. Entity tables (orders, billing_documents, deliveries) store canonical `store_name` looked up from the reference table during import, while original source data is preserved in `raw_data` JSONB.
+
+### Field Naming
+- Match JSON field names exactly (snake_case)
+- Use VARCHAR(50) for string IDs (allows for numeric and alphanumeric, e.g., order_id)
+- Use BIGINT for numeric IDs that need to match other BIGINT columns (e.g., customer_id, store_number)
+- Use TEXT for long text fields
+- Use DECIMAL(15, 2) for monetary amounts
+- Use DATE for date-only fields
+- **Type Consistency**: When IDs need to be used interchangeably (e.g., store_number and customer_id), use the same type (BIGINT) to avoid type mismatches
+
+## Data Import to PostgreSQL
+
+### Import Script Structure (`import_to_postgres.py`)
+
+#### Schema Creation
+- Always create tables using `CREATE TABLE IF NOT EXISTS` for idempotency
+- Include all indexes in schema creation
+- Use the same schema definition in both `schema.sql` and `create_schema()` function
+
+#### Data Extraction Function Pattern
+```python
+def get_canonical_store_name(conn: psycopg.Connection, customer_id: Optional[int]) -> Optional[str]:
+    """Get canonical store name from stores table for a given customer_id."""
+    if not customer_id:
+        return None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT store_name FROM stores WHERE customer_id = %s", (customer_id,))
+            result = cur.fetchone()
+            return result[0] if result else None
+    except Exception:
+        return None
+
+def extract_{entity}_data({entity}_json: Dict[str, Any], conn: Optional[psycopg.Connection] = None) -> Optional[Dict[str, Any]]:
+    """Extract {entity} data from flattened JSON structure.
+    
+    Args:
+        {entity}_json: Flattened JSON structure (all fields at top level with snake_case)
+        conn: Optional database connection to lookup canonical store names
+        
+    Returns:
+        Dictionary with {entity} fields or None if structure invalid
+    """
+    {entity}_id = {entity}_json.get('{entity}_id')
+    if not {entity}_id:
+        return None
+    
+    customer_id = {entity}_json.get('customer_id')
+    
+    # Get canonical store name from stores table if available
+    store_name = None
+    if conn and customer_id:
+        store_name = get_canonical_store_name(conn, customer_id)
+    
+    # Fall back to source store_name if canonical name not found
+    if not store_name:
+        store_name = {entity}_json.get('store_name')
+    
+    return {
+        '{entity}_id': {entity}_id,
+        'customer_id': customer_id,
+        'store_name': store_name,  # Use canonical name if available
+        # Extract other structured fields from top-level JSON
+        'field_name': {entity}_json.get('field_name'),
+        ...
+        'raw_data': json.dumps({entity}_json)  # Store full flattened JSON (preserves original store_name)
+    }
+```
+
+#### Relationship Parsing Pattern
+```python
+def parse_comma_separated(value: Any) -> List[str]:
+    """Parse comma-separated string into list of values.
+    
+    Handles: comma-separated strings, lists, single values, None
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if v]
+    if isinstance(value, (int, float)):
+        return [str(value)]
+    if isinstance(value, str):
+        return [v.strip() for v in value.split(',') if v.strip()]
+    return []
+
+def insert_{entity}_relationships(conn, {entity}_id: str, {entity}_json: Dict[str, Any]) -> None:
+    """Insert {entity} relationships into junction tables."""
+    with conn.cursor() as cur:
+        # Delete existing relationships
+        cur.execute("DELETE FROM {parent}_{related} WHERE {parent}_id = %s", ({entity}_id,))
+        
+        # Parse and insert
+        related_ids = parse_comma_separated({entity}_json.get('{related}_id'))
+        for related_id in related_ids:
+            cur.execute("""
+                INSERT INTO {parent}_{related} ({parent}_id, {related}_id)
+                VALUES (%s, %s)
+                ON CONFLICT ({parent}_id, {related}_id) DO NOTHING
+            """, ({entity}_id, related_id))
+```
+
+#### Insert Function Pattern
+```python
+def insert_{entity}(conn: psycopg.Connection, {entity}_data: Dict[str, Any]) -> bool:
+    """Insert {entity} into database with ON CONFLICT upsert."""
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO {entity} (
+                    {entity}_id, field1, field2, ..., raw_data
+                ) VALUES (
+                    %({entity}_id)s, %(field1)s, %(field2)s, ..., %(raw_data)s
+                )
+                ON CONFLICT ({entity}_id) DO UPDATE SET
+                    field1 = EXCLUDED.field1,
+                    field2 = EXCLUDED.field2,
+                    ...
+                    raw_data = EXCLUDED.raw_data
+            """, {entity}_data)
+        return True
+    except Exception as e:
+        print(f"Error inserting {entity} {entity}_data.get('{entity}_id')}: {e}")
+        return False
+```
+
+#### Main Import Loop Pattern
+```python
+for json_file in json_files:
+    # Load JSON
+    {entity}_json = load_{entity}_file(json_file)
+    if not {entity}_json:
+        errors += 1
+        continue
+    
+    # Extract structured data (pass conn to lookup canonical store names)
+    {entity}_data = extract_{entity}_data({entity}_json, conn)
+    if not {entity}_data:
+        errors += 1
+        continue
+    
+    # Insert {entity}
+    if insert_{entity}(conn, {entity}_data):
+        # Insert relationships
+        insert_{entity}_relationships(conn, {entity}_data['{entity}_id'], {entity}_json)
+        
+        # Insert line items (if applicable)
+        items = extract_{entity}_items({entity}_json, {entity}_data['{entity}_id'])
+        insert_{entity}_items(conn, items)
+        
+        conn.commit()
+```
+
+## Reference Tables Pattern
+
+### Stores Table Example
+When creating reference tables that map external system IDs to internal identifiers:
+
+```sql
+-- Reference table mapping external customer_id to internal store data
+CREATE TABLE IF NOT EXISTS stores (
+    customer_id BIGINT PRIMARY KEY,  -- External ID from data source (matches orders.customer_id)
+    store_number BIGINT NOT NULL,    -- Internal store number
+    store_name VARCHAR(255) NOT NULL -- Internal store name
+);
+
+-- Foreign key from orders to stores
+ALTER TABLE orders 
+ADD CONSTRAINT fk_orders_customer_id 
+FOREIGN KEY (customer_id) REFERENCES stores(customer_id);
+```
+
+**Key Points:**
+- Use the external system's ID (customer_id) as the PRIMARY KEY
+- Store internal identifiers (store_number, store_name) as columns
+- Create foreign keys from entity tables (orders, billing_documents, deliveries) to the reference table
+- During import, lookup canonical `store_name` from the stores table and store it in entity tables
+- Original source store names are preserved in `raw_data` JSONB
+- This ensures entity tables display canonical store names without requiring joins
+- Use BIGINT for numeric IDs to match customer_id type for foreign keys
+
+## Consistency Requirements
+
+### When Adding New Entity Types (Billing Documents, Deliveries, etc.)
+
+1. **JSON Writer** (`src/storage/json_writer.py`):
+   - Create `save_{entity}()` method following `save_order()` pattern
+   - Use `_flatten_{entity}_data()` to flatten structure
+   - Convert all camelCase to snake_case
+   - Save only top-level fields with `{entity}_id` and `{entity}_lines`
+
+2. **Schema** (`schema.sql` and `import_to_postgres.py`):
+   - Create `{entity}` table with structured columns + `raw_data JSONB`
+   - Create `{entity}_items` table if entity has line items
+   - Create junction tables for many-to-many relationships
+   - Add appropriate indexes
+
+3. **Import Script** (`import_to_postgres.py`):
+   - Add `extract_{entity}_data()` function
+   - Add `extract_{entity}_items()` function if applicable
+   - Add `insert_{entity}()` function with ON CONFLICT upsert
+   - Add `insert_{entity}_relationships()` function if applicable
+   - Follow the same pattern as orders for consistency
+
+4. **Migration** (if needed):
+   - Create migration script following `migrate_json_structure.py` pattern
+   - Flatten nested structures to top-level with snake_case
+   - Remove any metadata fields
+
+### Key Consistency Points
+- Always use snake_case for all field names
+- Always include `raw_data JSONB` column
+- Use VARCHAR(50) for string ID columns (order_id, billing_document_id, etc.)
+- Use BIGINT for numeric IDs that need to match other BIGINT columns (customer_id, store_number)
+- Always handle comma-separated values via junction tables
+- Always use ON CONFLICT upserts for idempotent imports
+- Never transform or truncate data values, only field names
+- For reference tables (stores, etc.), use BIGINT for numeric IDs to match customer_id type for interoperability
+

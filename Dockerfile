@@ -64,7 +64,7 @@ RUN chmod +x docker-entrypoint.sh && \
     cp docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
 # Create directories for data and session persistence
-RUN mkdir -p /app/data /app/reports
+RUN mkdir -p /app/data /app/sessions
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
