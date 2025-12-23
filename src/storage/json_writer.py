@@ -313,9 +313,30 @@ class JSONWriter:
         Returns:
             Flattened dictionary with order_id and all orderHeader fields at top level,
             plus order_lines array with snake_case keys
+            
+        Raises:
+            ValueError: If order_data is invalid or missing required orderHeader
         """
-        # order_data is the returnValue from API, which contains orderHeader and orderLines
+        # Validate input data
+        if not order_data or not isinstance(order_data, dict):
+            raise ValueError(
+                f"Invalid order_data for order {order_id}: expected dict, got {type(order_data)}"
+            )
+        
+        # Validate that orderHeader exists and is not empty
         order_header = order_data.get('orderHeader', {})
+        if not order_header or not isinstance(order_header, dict):
+            raise ValueError(
+                f"Missing or invalid orderHeader in order {order_id}. "
+                f"order_data keys: {list(order_data.keys())}"
+            )
+        
+        if len(order_header) == 0:
+            raise ValueError(
+                f"Empty orderHeader in order {order_id}. "
+                f"This usually indicates an API error or authentication failure."
+            )
+        
         order_lines = order_data.get('orderLines', [])
         
         # Start with order_id
@@ -436,6 +457,23 @@ class JSONWriter:
         """
         # Flatten the structure first (needed for directory extraction)
         flattened = self._flatten_order_data(order_id, order_data)
+        
+        # Validate that we have minimum required fields
+        required_fields = ['order_id']
+        missing_fields = [field for field in required_fields if field not in flattened]
+        if missing_fields:
+            raise ValueError(
+                f"Missing required fields in flattened order data for order {order_id}: {missing_fields}"
+            )
+        
+        # Check that we have actual data beyond just order_id and order_lines
+        # A valid order should have at least some header fields (customer_id, order_creation_date, etc.)
+        data_fields = [k for k in flattened.keys() if k not in ['order_id', 'order_lines']]
+        if len(data_fields) == 0:
+            raise ValueError(
+                f"Incomplete order data for order {order_id}: only has order_id and order_lines, "
+                f"missing all header fields. This usually indicates an API error or authentication failure."
+            )
         
         # Get hierarchical directory based on date and store
         order_dir = self._get_order_directory(flattened)

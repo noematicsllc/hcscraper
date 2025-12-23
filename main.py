@@ -120,9 +120,14 @@ def print_extraction_summary(stats: Dict[str, Any], entity_type: str = "orders")
     print(f"Total {entity_type}: {stats['total']}")
     print(f"Processed: {stats.get('processed', stats['total'])}")
     print(f"Successful: {stats['successful']}")
+    if stats.get('skipped', 0) > 0:
+        print(f"Skipped (already exist): {stats['skipped']}")
     print(f"Failed: {stats['failed']}")
     if stats.get('stopped_early'):
-        print(f"\n⚠ Extraction stopped early due to consecutive failures")
+        if stats.get('stop_reason') == 'validation_failure':
+            print(f"\n✗ CRITICAL: Extraction stopped due to validation failure")
+        else:
+            print(f"\n⚠ Extraction stopped early due to consecutive failures")
     
     # Handle different failed ID key names
     failed_ids = (
@@ -378,12 +383,19 @@ def main():
         ) as extractor:
             if args.order_id:
                 # Single order
-                success = extractor.extract_single_order(args.order_id)
+                success, is_validation_failure, was_skipped = extractor.extract_single_order(args.order_id)
                 if success:
-                    print(f"\n✓ Successfully extracted order {args.order_id}")
+                    if was_skipped:
+                        print(f"\n✓ Order {args.order_id} already exists, skipped (use --update to re-download)")
+                    else:
+                        print(f"\n✓ Successfully extracted order {args.order_id}")
                     return 0
                 else:
-                    print(f"\n✗ Failed to extract order {args.order_id}")
+                    if is_validation_failure:
+                        print(f"\n✗ CRITICAL: Validation failed for order {args.order_id}")
+                        print(f"   This indicates a systemic problem. Check authentication and API status.")
+                    else:
+                        print(f"\n✗ Failed to extract order {args.order_id}")
                     return 1
 
             elif args.orders:
@@ -405,6 +417,15 @@ def main():
 
                 print_extraction_summary(stats, "orders")
 
+                # Return error code if any failures or if stopped early
+                if stats.get('stopped_early'):
+                    if stats.get('stop_reason') == 'validation_failure':
+                        print(f"\n✗ CRITICAL: Extraction stopped due to validation failure.")
+                        print(f"   DO NOT resume until the underlying issue is fixed.")
+                    else:
+                        print(f"\n⚠ Extraction stopped early due to consecutive failures.")
+                    return 1
+                
                 return 0 if stats['failed'] == 0 else 1
 
             elif args.orders_csv:
@@ -425,6 +446,15 @@ def main():
 
                 print_extraction_summary(stats, "orders")
 
+                # Return error code if any failures or if stopped early
+                if stats.get('stopped_early'):
+                    if stats.get('stop_reason') == 'validation_failure':
+                        print(f"\n✗ CRITICAL: Extraction stopped due to validation failure.")
+                        print(f"   DO NOT resume until the underlying issue is fixed.")
+                    else:
+                        print(f"\n⚠ Extraction stopped early due to consecutive failures.")
+                    return 1
+                
                 return 0 if stats['failed'] == 0 else 1
 
     elif args.billing_doc_id:
@@ -526,12 +556,20 @@ def main():
                 print(f"Successful: {stats['successful']}")
                 print(f"Failed: {stats['failed']}")
                 if stats.get('stopped_early'):
-                    print(f"\n⚠ Extraction stopped early due to consecutive failures")
+                    if stats.get('stop_reason') == 'validation_failure':
+                        print(f"\n✗ CRITICAL: Extraction stopped due to validation failure.")
+                        print(f"   DO NOT resume until the underlying issue is fixed.")
+                    else:
+                        print(f"\n⚠ Extraction stopped early due to consecutive failures")
                 if stats.get('failed_order_ids'):
                     print(f"\nFailed order IDs:")
                     for oid in stats['failed_order_ids']:
                         print(f"  - {oid}")
 
+                # Return error code if any failures or if stopped early
+                if stats.get('stopped_early'):
+                    return 1
+                
                 return 0 if stats['failed'] == 0 else 1
 
     else:

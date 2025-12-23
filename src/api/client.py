@@ -1,8 +1,11 @@
 """Hallmark Connect API client with retry logic and rate limiting."""
 
+import json
+import os
 import time
 import random
 import logging
+from pathlib import Path
 from typing import Dict, Any, Optional, List, Union, Callable
 import requests
 
@@ -186,7 +189,19 @@ class HallmarkAPIClient:
             return None
 
         # Parse Aura response
-        return self._parse_aura_response(response_data, order_id)
+        parsed_data = self._parse_aura_response(response_data, order_id)
+        
+        # If parsing failed, save raw response for debugging
+        if parsed_data is None:
+            self._save_raw_response_for_debugging(
+                entity_type="order",
+                entity_id=order_id,
+                raw_response=response_data,
+                request_spec=request_spec
+            )
+            logger.debug(f"Response structure for order {order_id}: {list(response_data.keys()) if isinstance(response_data, dict) else type(response_data)}")
+        
+        return parsed_data
 
     def get_billing_document_detail(self, billing_document_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve billing document detail from Hallmark Connect.
@@ -217,7 +232,18 @@ class HallmarkAPIClient:
             return None
 
         # Parse Aura response
-        return self._parse_aura_response(response_data, billing_document_id)
+        parsed_data = self._parse_aura_response(response_data, billing_document_id)
+        
+        # If parsing failed, save raw response for debugging
+        if parsed_data is None:
+            self._save_raw_response_for_debugging(
+                entity_type="billing_document",
+                entity_id=billing_document_id,
+                raw_response=response_data,
+                request_spec=request_spec
+            )
+        
+        return parsed_data
 
     def get_delivery_detail(self, delivery_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve delivery detail from Hallmark Connect.
@@ -248,7 +274,18 @@ class HallmarkAPIClient:
             return None
 
         # Parse Aura response
-        return self._parse_aura_response(response_data, delivery_id)
+        parsed_data = self._parse_aura_response(response_data, delivery_id)
+        
+        # If parsing failed, save raw response for debugging
+        if parsed_data is None:
+            self._save_raw_response_for_debugging(
+                entity_type="delivery",
+                entity_id=delivery_id,
+                raw_response=response_data,
+                request_spec=request_spec
+            )
+        
+        return parsed_data
 
     def search_orders(
         self,
@@ -521,29 +558,160 @@ class HallmarkAPIClient:
             logger.error(f"Invalid response format for order {order_id}")
             return None
 
-        # Aura responses have an 'actions' array
+        # Check if response has 'actions' array (standard Aura response)
         actions = response_data.get('actions', [])
-        if not actions:
-            logger.error(f"No actions in response for order {order_id}")
-            return None
+        if actions:
+            # Get first action (should only be one for our requests)
+            action = actions[0]
+            state = action.get('state')
 
-        # Get first action (should only be one for our requests)
-        action = actions[0]
-        state = action.get('state')
+            if state == 'SUCCESS':
+                logger.debug(f"Action successful for order {order_id}")
+                return_value = action.get('returnValue')
+                
+                # Validate that returnValue is not None or empty
+                if return_value is None:
+                    logger.warning(f"Empty returnValue (None) for order {order_id}")
+                    return None
+                
+                if isinstance(return_value, dict) and len(return_value) == 0:
+                    logger.warning(f"Empty returnValue (empty dict) for order {order_id}")
+                    return None
+                
+                # Check if returnValue contains nested returnValue (some API responses wrap it)
+                # This happens when the response structure is: {returnValue: {returnValue: {...actual data...}, cacheable: true}}
+                if isinstance(return_value, dict) and 'returnValue' in return_value:
+                    nested = return_value.get('returnValue')
+                    # If nested has expected structure (orderHeader/billingDocumentHeader), use it
+                    if isinstance(nested, dict) and ('orderHeader' in nested or 'billingDocumentHeader' in nested):
+                        logger.debug(f"Using nested returnValue with expected structure for order {order_id}")
+                        return nested
+                    # If outer has cacheable but nested doesn't, nested is likely the actual data
+                    elif isinstance(nested, dict) and 'cacheable' in return_value and 'cacheable' not in nested:
+                        logger.debug(f"Unwrapping nested returnValue (outer has cacheable) for order {order_id}")
+                        return nested
+                    # If nested exists and is a dict, prefer it over outer wrapper
+                    elif isinstance(nested, dict):
+                        logger.debug(f"Using nested returnValue for order {order_id}")
+                        return nested
+                
+                return return_value
 
-        if state == 'SUCCESS':
-            logger.debug(f"Action successful for order {order_id}")
-            return action.get('returnValue')
+            elif state == 'ERROR':
+                errors = action.get('error', [])
+                error_messages = [err.get('message', 'Unknown error') for err in errors]
+                logger.error(f"Action failed for order {order_id}: {', '.join(error_messages)}")
+                return None
 
-        elif state == 'ERROR':
-            errors = action.get('error', [])
-            error_messages = [err.get('message', 'Unknown error') for err in errors]
-            logger.error(f"Action failed for order {order_id}: {', '.join(error_messages)}")
-            return None
-
+            else:
+                logger.error(f"Unknown action state '{state}' for order {order_id}")
+                return None
+        
+        # Handle alternative response structure where returnValue is at top level
+        # This can happen if the API response structure is different
+        if 'returnValue' in response_data:
+            logger.debug(f"Found returnValue at top level for order {order_id}")
+            return_value = response_data.get('returnValue')
+            
+            # Check if returnValue is itself a dict that might contain nested returnValue
+            # (some API responses wrap returnValue in another returnValue)
+            if isinstance(return_value, dict):
+                # If returnValue contains nested 'returnValue' key, check if we should unwrap it
+                if 'returnValue' in return_value:
+                    nested = return_value.get('returnValue')
+                    # If nested has expected structure (orderHeader/billingDocumentHeader), use it
+                    if isinstance(nested, dict) and ('orderHeader' in nested or 'billingDocumentHeader' in nested):
+                        logger.debug(f"Using nested returnValue with expected structure for order {order_id}")
+                        return nested
+                    # If nested doesn't have cacheable (meaning it's the actual data), use it
+                    elif isinstance(nested, dict) and 'cacheable' not in nested:
+                        logger.debug(f"Unwrapping nested returnValue for order {order_id}")
+                        return nested
+                # If returnValue contains 'orderHeader' or other expected keys directly, use it
+                elif 'orderHeader' in return_value or 'billingDocumentHeader' in return_value:
+                    logger.debug(f"returnValue contains expected structure for order {order_id}")
+                    return return_value
+            
+            # Validate that returnValue is not None or empty
+            if return_value is None:
+                logger.warning(f"Empty returnValue (None) at top level for order {order_id}")
+                return None
+            
+            if isinstance(return_value, dict) and len(return_value) == 0:
+                logger.warning(f"Empty returnValue (empty dict) at top level for order {order_id}")
+                return None
+            
+            return return_value
+        
         else:
-            logger.error(f"Unknown action state '{state}' for order {order_id}")
+            # Log the actual structure for debugging
+            logger.error(
+                f"Unexpected response structure for order {order_id}. "
+                f"Expected 'actions' array or 'returnValue' at top level. "
+                f"Available keys: {list(response_data.keys())}"
+            )
+            logger.debug(f"Full response structure (first 1000 chars): {str(response_data)[:1000]}")
             return None
+
+    def _save_raw_response_for_debugging(
+        self,
+        entity_type: str,
+        entity_id: str,
+        raw_response: Dict[str, Any],
+        request_spec: Dict[str, Any]
+    ) -> None:
+        """Save raw API response to debug directory for inspection.
+        
+        This ensures we have the actual response structure when parsing fails,
+        eliminating the need to guess about the structure.
+        
+        Args:
+            entity_type: Type of entity (order, billing_document, delivery)
+            entity_id: The entity ID
+            raw_response: The raw response JSON from the API
+            request_spec: The request specification (url, headers, data)
+        """
+        try:
+            # Get debug directory from environment or use default
+            debug_dir = Path(os.getenv('DEBUG_DIRECTORY', './debug_responses'))
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create filename with timestamp and entity info
+            from datetime import datetime
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"{entity_type}_{entity_id}_{timestamp}_raw_response.json"
+            filepath = debug_dir / filename
+            
+            # Prepare debug data with full context
+            debug_data = {
+                "entity_type": entity_type,
+                "entity_id": entity_id,
+                "timestamp": timestamp,
+                "request": {
+                    "url": request_spec.get('url'),
+                    "headers": request_spec.get('headers', {}),
+                    "data_keys": list(request_spec.get('data', {}).keys()) if isinstance(request_spec.get('data'), dict) else None
+                },
+                "raw_response": raw_response,
+                "response_structure": {
+                    "top_level_keys": list(raw_response.keys()) if isinstance(raw_response, dict) else None,
+                    "has_actions": isinstance(raw_response, dict) and 'actions' in raw_response,
+                    "has_returnValue": isinstance(raw_response, dict) and 'returnValue' in raw_response,
+                    "actions_count": len(raw_response.get('actions', [])) if isinstance(raw_response, dict) else 0
+                }
+            }
+            
+            # Save to file
+            with open(filepath, 'w', encoding='utf-8') as f:
+                json.dump(debug_data, f, indent=2, ensure_ascii=False)
+            
+            logger.warning(
+                f"Saved raw API response for {entity_type} {entity_id} to {filepath} "
+                f"for debugging. Inspect this file to understand the actual response structure."
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to save raw response for debugging: {e}")
 
     def _apply_rate_limit(self, request_type: str = RequestType.DETAIL) -> None:
         """Apply rate limiting by waiting if necessary.
