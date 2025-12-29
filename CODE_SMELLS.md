@@ -1,140 +1,10 @@
 # Code Smells Analysis
 
-This document identifies 2 code smells found in the codebase and suggests solutions for addressing them.
+This document identifies 1 code smell found in the codebase and suggests solutions for addressing it.
 
 ---
 
-## 1. Duplicated Database Connection Logic
-
-### Problem
-Both `OrderExtractor` and `BillingDocumentExtractor` contain nearly identical database connection setup and cleanup code:
-
-- **`src/extractors/order_extractor.py`** (lines 143-153, 368-382): Database connection setup and `close()` method
-- **`src/extractors/billing_document_extractor.py`** (lines 49-59, 189-203): Identical database connection setup and `close()` method
-
-The code is duplicated verbatim, including:
-- Optional `psycopg` import check
-- `DATABASE_URL` environment variable retrieval
-- Connection attempt with error handling
-- Identical `close()` method implementation
-- Context manager support
-
-### Impact
-- **DRY violation**: Code duplication increases maintenance burden
-- **Inconsistency risk**: Changes to connection logic must be synchronized manually
-- **Testing duplication**: Same connection logic must be tested in multiple places
-- **Future extractors**: New extractors will likely copy the same pattern
-
-### Solution
-Create a base extractor class with shared database connection logic:
-
-```python
-# src/extractors/base_extractor.py
-"""Base extractor class with shared functionality."""
-
-import os
-import logging
-from pathlib import Path
-from typing import Optional
-
-try:
-    import psycopg
-except ImportError:
-    psycopg = None
-
-from ..storage.json_writer import JSONWriter
-from ..api.client import HallmarkAPIClient
-
-logger = logging.getLogger(__name__)
-
-
-class BaseExtractor:
-    """Base class for extractors with shared database connection logic."""
-    
-    def __init__(
-        self,
-        api_client: HallmarkAPIClient,
-        output_directory: Path,
-        save_json: bool = True,
-        update_mode: bool = False
-    ):
-        """Initialize base extractor.
-        
-        Args:
-            api_client: Configured API client
-            output_directory: Directory for output files
-            save_json: Whether to save JSON files (default: True)
-            update_mode: If True, re-download existing files (default: False)
-        """
-        self.api_client = api_client
-        self.output_directory = Path(output_directory)
-        self.save_json = save_json
-        self.update_mode = update_mode
-        
-        # Try to connect to database for store number lookup (optional)
-        self._db_connection = self._connect_to_database()
-        
-        # Initialize storage handler
-        if self.save_json:
-            self.json_writer = JSONWriter(output_directory, db_connection=self._db_connection)
-    
-    def _connect_to_database(self) -> Optional[Any]:
-        """Connect to database for store number lookup (optional).
-        
-        Returns:
-            Database connection or None if connection fails or psycopg not available
-        """
-        if not psycopg:
-            return None
-        
-        database_url = os.getenv('DATABASE_URL')
-        if not database_url:
-            return None
-        
-        try:
-            connection = psycopg.connect(database_url)
-            logger.info("Connected to database for store number lookup")
-            return connection
-        except Exception as e:
-            logger.debug(f"Could not connect to database for store lookup: {e}")
-            return None
-    
-    def close(self) -> None:
-        """Close database connection if it exists.
-        
-        Should be called when done with the extractor to prevent connection leaks.
-        """
-        if self._db_connection:
-            try:
-                self._db_connection.close()
-                logger.debug("Database connection closed")
-                self._db_connection = None
-                # Clear reference in json_writer as well
-                if hasattr(self, 'json_writer'):
-                    self.json_writer.db_connection = None
-            except Exception as e:
-                logger.warning(f"Error closing database connection: {e}")
-    
-    def __enter__(self):
-        """Context manager entry - returns self."""
-        return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - closes database connection."""
-        self.close()
-        return False  # Don't suppress exceptions
-```
-
-**Refactoring steps:**
-1. Create `src/extractors/base_extractor.py` with `BaseExtractor` class
-2. Update `OrderExtractor` to inherit from `BaseExtractor` and remove duplicated code
-3. Update `BillingDocumentExtractor` to inherit from `BaseExtractor` and remove duplicated code
-4. Ensure all existing functionality is preserved
-5. Add unit tests for the base class
-
----
-
-## 2. Long Method with Multiple Responsibilities
+## 1. Long Method with Multiple Responsibilities
 
 ### Problem
 The `_parse_aura_response()` method in `src/api/client.py` (lines 543-654) is approximately 110 lines long and handles multiple responsibilities:
@@ -346,12 +216,11 @@ def _has_expected_structure(self, data: Dict[str, Any]) -> bool:
 
 ## Summary
 
-These two code smells represent common issues that can be addressed through refactoring:
+This code smell represents a common issue that can be addressed through refactoring:
 
-1. **Duplicated database connection** → Extract to base class
-2. **Long method with multiple responsibilities** → Break into smaller, focused methods
+1. **Long method with multiple responsibilities** → Break into smaller, focused methods
 
-All solutions follow established design principles (DRY, SRP, Single Responsibility) and will improve maintainability, testability, and code clarity.
+The solution follows established design principles (SRP, Single Responsibility) and will improve maintainability, testability, and code clarity.
 
 ---
 
@@ -366,4 +235,14 @@ Date parsing logic has been centralized in `src/utils/date_parser.py` with the f
 - `extract_year_month()`: Extracts year and month from any date value
 
 Both `import_to_postgres.py` and `src/storage/json_writer.py` now use these centralized utilities, eliminating code duplication.
+
+### ✅ Duplicated Database Connection Logic (Resolved)
+**Status**: Implemented and resolved
+
+Database connection logic has been centralized in `src/extractors/base_extractor.py` with the `BaseExtractor` base class. The base class provides:
+- `_connect_to_database()`: Handles optional database connection setup
+- `close()`: Closes database connections and cleans up resources
+- `__enter__()` and `__exit__()`: Context manager protocol implementation
+
+Both `OrderExtractor` and `BillingDocumentExtractor` now inherit from `BaseExtractor`, eliminating ~40 lines of duplicated code from each class. The context manager pattern is preserved and all existing functionality remains unchanged.
 

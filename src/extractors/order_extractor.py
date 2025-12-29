@@ -1,19 +1,13 @@
 """Order data extraction coordinator."""
 
-import os
 import time
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any, Callable, Tuple
 
-try:
-    import psycopg
-except ImportError:
-    psycopg = None
-
 from ..api.client import HallmarkAPIClient
-from ..storage.json_writer import JSONWriter
 from ..utils.config import DEFAULT_MAX_CONSECUTIVE_FAILURES
+from .base_extractor import BaseExtractor
 
 
 logger = logging.getLogger(__name__)
@@ -114,7 +108,7 @@ class ProgressTracker:
         }
 
 
-class OrderExtractor:
+class OrderExtractor(BaseExtractor):
     """Coordinates order data extraction and storage."""
 
     def __init__(
@@ -134,27 +128,11 @@ class OrderExtractor:
             update_mode: If True, re-download existing files. If False, skip existing files (default: False)
             max_consecutive_failures: Maximum consecutive failures before stopping (default: DEFAULT_MAX_CONSECUTIVE_FAILURES)
         """
-        self.api_client = api_client
-        self.output_directory = Path(output_directory)
-        self.save_json = save_json
-        self.update_mode = update_mode
+        # Initialize base class (handles database connection and JSON writer)
+        super().__init__(api_client, output_directory, save_json, update_mode)
+        
+        # OrderExtractor-specific initialization
         self.max_consecutive_failures = max_consecutive_failures
-
-        # Try to connect to database for store number lookup (optional)
-        self._db_connection = None
-        if psycopg:
-            database_url = os.getenv('DATABASE_URL')
-            if database_url:
-                try:
-                    self._db_connection = psycopg.connect(database_url)
-                    logger.info("Connected to database for store number lookup")
-                except Exception as e:
-                    logger.debug(f"Could not connect to database for store lookup: {e}")
-                    self._db_connection = None
-
-        # Initialize storage handler
-        if self.save_json:
-            self.json_writer = JSONWriter(output_directory, db_connection=self._db_connection)
 
     def extract_single_order(self, order_id: str) -> Tuple[bool, bool, bool]:
         """Extract data for a single order.
@@ -365,27 +343,3 @@ class OrderExtractor:
             "stop_reason": stop_reason
         }
 
-    def close(self) -> None:
-        """Close database connection if it exists.
-        
-        Should be called when done with the extractor to prevent connection leaks.
-        """
-        if self._db_connection:
-            try:
-                self._db_connection.close()
-                logger.debug("Database connection closed")
-                self._db_connection = None
-                # Clear reference in json_writer as well
-                if hasattr(self, 'json_writer'):
-                    self.json_writer.db_connection = None
-            except Exception as e:
-                logger.warning(f"Error closing database connection: {e}")
-
-    def __enter__(self):
-        """Context manager entry - returns self."""
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - closes database connection."""
-        self.close()
-        return False  # Don't suppress exceptions
