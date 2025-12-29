@@ -103,10 +103,13 @@ class HallmarkAuthenticator:
 
         try:
             with sync_playwright() as p:
+                logger.debug("Launching Chromium browser for saved session...")
                 browser = p.chromium.launch(headless=self.headless)
                 try:
                     # Create context with saved state
+                    logger.debug(f"Loading browser context from saved session: {self.session_file}")
                     context = browser.new_context(storage_state=str(self.session_file))
+                    logger.debug("Creating new page...")
                     page = context.new_page()
 
                     # Navigate to a protected page to verify session is valid
@@ -133,11 +136,15 @@ class HallmarkAuthenticator:
                     logger.info("✓ Successfully authenticated using saved session (no MFA needed!)")
                     return True
 
+                except Exception as e:
+                    logger.error(f"Error during saved session authentication: {e}", exc_info=True)
+                    return False
                 finally:
+                    logger.debug("Closing browser...")
                     browser.close()
 
         except Exception as e:
-            logger.warning(f"Failed to load saved session: {e}")
+            logger.error(f"Failed to load saved session: {e}", exc_info=True)
             return False
 
     def authenticate(self, save_session: bool = True) -> bool:
@@ -153,11 +160,15 @@ class HallmarkAuthenticator:
             Exception: If authentication fails
         """
         logger.info("Starting full authentication flow (login + MFA)")
+        logger.info(f"Browser mode: {'headless' if self.headless else 'headed'}")
 
         with sync_playwright() as p:
+            logger.debug("Launching Chromium browser...")
             browser = p.chromium.launch(headless=self.headless)
             try:
+                logger.debug("Creating browser context...")
                 context = browser.new_context()
+                logger.debug("Creating new page...")
                 page = context.new_page()
 
                 # Step 1: Navigate to the base URL
@@ -400,11 +411,16 @@ class HallmarkAuthenticator:
                 # Step 9: Create requests session with cookies
                 logger.info("Step 9: Creating requests session with cookies...")
                 self._session = self._create_session(page)
+                logger.info(f"✓ Created requests session with {len(page.context.cookies())} cookies")
 
                 logger.info("✓ Authentication completed successfully")
                 return True
 
+            except Exception as e:
+                logger.error(f"Authentication failed with exception: {e}", exc_info=True)
+                raise
             finally:
+                logger.debug("Closing browser...")
                 browser.close()
 
     def _save_browser_state(self, context: BrowserContext) -> None:
@@ -414,11 +430,12 @@ class HallmarkAuthenticator:
             context: Playwright browser context to save
         """
         try:
+            logger.debug(f"Saving browser state to {self.session_file}")
             context.storage_state(path=str(self.session_file))
             logger.info(f"✓ Session saved to {self.session_file}")
             logger.info("  Next run will skip login/MFA!")
         except Exception as e:
-            logger.warning(f"Failed to save session state: {e}")
+            logger.error(f"Failed to save session state: {e}", exc_info=True)
 
     def _extract_tokens(self, page: Page) -> Optional[Dict[str, str]]:
         """Extract Aura framework tokens from page using multiple methods.
@@ -739,97 +756,6 @@ class HallmarkAuthenticator:
             logger.warning(f"  ✗ Storage extraction method failed with exception: {e}")
 
         return None
-        """Extract tokens using regex patterns from page content.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with token, context, and fwuid, or None if extraction fails
-        """
-        logger.info("  Trying regex extraction method: regex patterns from page content")
-        try:
-            content = page.content()
-
-            # Multiple token patterns to try
-            token_patterns = [
-                # JWT token pattern (most reliable for Salesforce Lightning)
-                (r'"token"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"]*)"', "JWT token in JSON"),
-                # JWT in inline assignment
-                (r'token\s*[=:]\s*["\']?(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"\']*)["\']?', "JWT token assignment"),
-                # Standard aura.token pattern
-                (r'"aura\.token"\s*:\s*"([^"]+)"', "aura.token JSON"),
-                # Token in inline script
-                (r'aura\.token\s*=\s*["\']([^"\']+)["\']', "aura.token assignment"),
-                # Token in config object (non-JWT)
-                (r'"token"\s*:\s*"([^"]{20,})"', "token JSON property"),
-                # Salesforce session ID pattern
-                (r'sid=([a-zA-Z0-9!]+)', "sid URL param"),
-                # CSRF token pattern
-                (r'"csrfToken"\s*:\s*"([^"]+)"', "csrfToken"),
-                # Lightning context token
-                (r'"TOKEN"\s*:\s*"([^"]+)"', "TOKEN property"),
-                # Aura config patterns
-                (r'Aura\.initConfig\s*=\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "Aura.initConfig token"),
-                # Token in appBootstrap
-                (r'"appBootstrap"[^}]*"token"\s*:\s*"([^"]+)"', "appBootstrap token"),
-            ]
-
-            # Multiple fwuid patterns to try
-            fwuid_patterns = [
-                (r'"fwuid"\s*:\s*"([^"]+)"', "fwuid JSON"),
-                (r'fwuid\s*=\s*["\']([^"\']+)["\']', "fwuid assignment"),
-                (r'"FWUID"\s*:\s*"([^"]+)"', "FWUID property"),
-            ]
-
-            # Multiple context patterns
-            context_patterns = [
-                (r'"aura\.context"\s*:\s*(\{[^}]+\})', "aura.context JSON"),
-                (r'aura\.context\s*=\s*(\{[^}]+\})', "aura.context assignment"),
-            ]
-
-            token = None
-            fwuid = None
-            context = None
-
-            # Try each token pattern
-            for pattern, name in token_patterns:
-                match = re.search(pattern, content, re.IGNORECASE)
-                if match:
-                    token = match.group(1)
-                    logger.info(f"    Found token via pattern '{name}': {token[:50]}...")
-                    break
-
-            # Try each fwuid pattern
-            for pattern, name in fwuid_patterns:
-                match = re.search(pattern, content, re.IGNORECASE)
-                if match:
-                    fwuid = match.group(1)
-                    logger.info(f"    Found fwuid via pattern '{name}': {fwuid}")
-                    break
-
-            # Try each context pattern
-            for pattern, name in context_patterns:
-                match = re.search(pattern, content, re.IGNORECASE)
-                if match:
-                    context = match.group(1)
-                    logger.info(f"    Found context via pattern '{name}'")
-                    break
-
-            if token:
-                logger.info("  ✓ Successfully extracted tokens via: regex patterns")
-                return {
-                    "token": token,
-                    "context": context or "",
-                    "fwuid": fwuid or ""
-                }
-
-            logger.warning("  ✗ Regex extraction found no tokens via regex patterns")
-
-        except Exception as e:
-            logger.warning(f"  ✗ Regex extraction method failed with exception: {e}")
-
-        return None
 
     def _create_session(self, page: Page) -> requests.Session:
         """Create requests.Session with cookies from Playwright.
@@ -839,21 +765,44 @@ class HallmarkAuthenticator:
 
         Returns:
             requests.Session configured with browser cookies
+
+        Raises:
+            Exception: If cookie transfer fails
         """
-        session = requests.Session()
+        try:
+            session = requests.Session()
 
-        # Transfer cookies from Playwright to requests
-        cookies = page.context.cookies()
-        for cookie in cookies:
-            session.cookies.set(
-                name=cookie["name"],
-                value=cookie["value"],
-                domain=cookie.get("domain", ""),
-                path=cookie.get("path", "/")
-            )
+            # Transfer cookies from Playwright to requests
+            cookies = page.context.cookies()
+            logger.debug(f"Transferring {len(cookies)} cookies from browser to requests session")
+            
+            transferred_count = 0
+            for cookie in cookies:
+                try:
+                    session.cookies.set(
+                        name=cookie["name"],
+                        value=cookie["value"],
+                        domain=cookie.get("domain", ""),
+                        path=cookie.get("path", "/")
+                    )
+                    transferred_count += 1
+                except Exception as e:
+                    logger.warning(f"Failed to transfer cookie '{cookie.get('name', 'unknown')}': {e}")
 
-        logger.debug(f"Transferred {len(cookies)} cookies to session")
-        return session
+            logger.info(f"Transferred {transferred_count}/{len(cookies)} cookies to requests session")
+            
+            # Log session cookie names for debugging
+            session_cookie_names = [c.get('name', '') for c in cookies if c.get('name', '').lower() in [sc.lower() for sc in self.SF_SESSION_COOKIES]]
+            if session_cookie_names:
+                logger.debug(f"Session cookies transferred: {', '.join(session_cookie_names)}")
+            
+            if transferred_count == 0:
+                logger.warning("No cookies transferred - session may not be authenticated")
+            
+            return session
+        except Exception as e:
+            logger.error(f"Failed to create requests session: {e}", exc_info=True)
+            raise
 
     def get_session(self) -> requests.Session:
         """Get authenticated requests session.
@@ -865,7 +814,9 @@ class HallmarkAuthenticator:
             RuntimeError: If not authenticated yet
         """
         if not self._session:
+            logger.error("Attempted to get session but not authenticated")
             raise RuntimeError("Not authenticated. Call authenticate() first.")
+        logger.debug("Returning authenticated requests session")
         return self._session
 
     def get_tokens(self) -> Dict[str, str]:
@@ -878,7 +829,9 @@ class HallmarkAuthenticator:
             RuntimeError: If not authenticated yet
         """
         if not self._tokens:
+            logger.error("Attempted to get tokens but not authenticated")
             raise RuntimeError("Not authenticated. Call authenticate() first.")
+        logger.debug("Returning authentication tokens")
         return self._tokens
 
     def is_authenticated(self) -> bool:
@@ -887,13 +840,17 @@ class HallmarkAuthenticator:
         Returns:
             bool: True if authenticated and tokens available
         """
-        return self._tokens is not None and self._session is not None
+        authenticated = self._tokens is not None and self._session is not None
+        logger.debug(f"Authentication status check: {authenticated}")
+        return authenticated
 
     def clear_saved_session(self) -> None:
         """Delete saved session file."""
         if self.session_file.exists():
             self.session_file.unlink()
             logger.info(f"Deleted saved session: {self.session_file}")
+        else:
+            logger.debug(f"Saved session file does not exist: {self.session_file}")
 
     def _log_mfa_page_elements(self, page: Page) -> None:
         """Log MFA-related elements visible on the page for debugging.
