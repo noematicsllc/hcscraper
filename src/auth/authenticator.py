@@ -439,27 +439,11 @@ class HallmarkAuthenticator:
             # URL tokens give us the session ID, but we still need Aura tokens
             # Store the session ID and continue to get Aura tokens
 
-        # Method 2: Check if page needs to load more before Aura is available
-        # Sometimes after SAML redirect, we need to wait for the SPA to initialize
-        if not self._is_aura_available(page):
-            logger.info("  Aura not available yet, waiting for SPA initialization...")
-            self._wait_for_aura(page)
-
-        # Method 3: Try JavaScript extraction for Aura tokens
-        logger.info("Method 3: Attempting JavaScript Aura extraction...")
-        tokens = self._extract_tokens_js(page)
-        if tokens:
-            logger.info("  ✓ JavaScript Aura extraction succeeded")
-            # Merge with any URL tokens we found
-            if url_tokens:
-                tokens['session_id'] = url_tokens.get('session_id', '')
-                tokens['org_id'] = url_tokens.get('org_id', '')
-            return tokens
-        else:
-            logger.warning("  ✗ JavaScript Aura extraction failed - no tokens extracted")
-
-        # Method 4: Try localStorage/sessionStorage
-        logger.info("Method 4: Attempting storage extraction (localStorage/sessionStorage)...")
+        # Method 2: Try localStorage/sessionStorage (ONLY METHOD THAT WORKS)
+        # Based on successful authentication logs, storage extraction is the ONLY reliable method.
+        # All JavaScript methods fail in practice, and fallback methods (regex, page source) were
+        # never reached in logs since storage extraction always succeeds. They have been removed.
+        logger.info("Method 2: Attempting storage extraction (localStorage/sessionStorage)...")
         storage_tokens = self._extract_tokens_from_storage(page)
         if storage_tokens:
             logger.info("  ✓ Storage extraction succeeded")
@@ -470,63 +454,27 @@ class HallmarkAuthenticator:
         else:
             logger.warning("  ✗ Storage extraction failed - no tokens found in storage")
 
-        # Method 5: Fallback to regex extraction from page source
-        logger.info("Method 5: Attempting regex extraction from page source...")
-        regex_tokens = self._extract_tokens_regex(page)
-        if regex_tokens:
-            logger.info("  ✓ Regex extraction succeeded")
-            if url_tokens:
-                regex_tokens['session_id'] = url_tokens.get('session_id', '')
-                regex_tokens['org_id'] = url_tokens.get('org_id', '')
-            return regex_tokens
+        # CRITICAL - Do NOT allow empty tokens
+        # The Salesforce Aura API requires a valid aura.token field.
+        # Empty tokens cause the API to return empty responses (status 200, empty body).
+        # We must fail authentication if we cannot extract a token.
+        session_id = url_tokens.get('session_id', '') if url_tokens else None
+        fwuid = self._extract_fwuid_from_page(page)
+        
+        if session_id:
+            logger.error(
+                "  ✗ CRITICAL: Cannot extract Aura token but have session ID. "
+                "The API requires a valid aura.token - empty tokens will cause API failures. "
+                "Authentication cannot proceed without a valid token."
+            )
+            logger.error(
+                "  Available: session_id={}, fwuid={}, but missing required aura.token".format(
+                    session_id[:20] + "..." if session_id and len(session_id) > 20 else session_id,
+                    fwuid[:20] + "..." if fwuid and len(fwuid) > 20 else fwuid
+                )
+            )
         else:
-            logger.warning("  ✗ Regex extraction failed - no tokens found via regex patterns")
-
-        # Method 6: If we have URL tokens but couldn't get Aura tokens,
-        # try navigating to a page that will initialize Aura
-        if url_tokens:
-            logger.info("Method 6: Attempting Aura initialization with session ID...")
-            aura_tokens = self._initialize_aura_with_session(page, url_tokens)
-            if aura_tokens:
-                logger.info("  ✓ Aura initialization succeeded")
-                return aura_tokens
-            else:
-                logger.warning("  ✗ Aura initialization failed - could not initialize Aura with session")
-
-            # Method 7: Last resort - try to extract token from page source HTML
-            # This is a fallback when JavaScript methods fail
-            logger.info("Method 7: Attempting deep page source scan...")
-            page_source_tokens = self._extract_tokens_from_page_source(page)
-            if page_source_tokens and page_source_tokens.get("token"):
-                logger.info("  ✓ Deep page source scan succeeded")
-                if url_tokens:
-                    page_source_tokens['session_id'] = url_tokens.get('session_id', '')
-                    page_source_tokens['org_id'] = url_tokens.get('org_id', '')
-                return page_source_tokens
-            else:
-                logger.warning("  ✗ Deep page source scan failed - no tokens found in page source")
-
-            # Method 8: CRITICAL - Do NOT allow empty tokens
-            # The Salesforce Aura API requires a valid aura.token field.
-            # Empty tokens cause the API to return empty responses (status 200, empty body).
-            # We must fail authentication if we cannot extract a token.
-            session_id = url_tokens.get('session_id', '') if url_tokens else None
-            fwuid = self._extract_fwuid_from_page(page)
-            
-            if session_id:
-                logger.error(
-                    "  ✗ CRITICAL: Cannot extract Aura token but have session ID. "
-                    "The API requires a valid aura.token - empty tokens will cause API failures. "
-                    "Authentication cannot proceed without a valid token."
-                )
-                logger.error(
-                    "  Available: session_id={}, fwuid={}, but missing required aura.token".format(
-                        session_id[:20] + "..." if session_id and len(session_id) > 20 else session_id,
-                        fwuid[:20] + "..." if fwuid and len(fwuid) > 20 else fwuid
-                    )
-                )
-            else:
-                logger.error("  ✗ CRITICAL: Cannot extract Aura token and no session ID available")
+            logger.error("  ✗ CRITICAL: Cannot extract Aura token and no session ID available")
 
         logger.error("All token extraction methods failed - authentication cannot proceed without Aura token")
         return None
@@ -668,114 +616,13 @@ class HallmarkAuthenticator:
 
         return None
 
-    def _is_aura_available(self, page: Page) -> bool:
-        """Check if Aura framework is available on the page.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            bool: True if Aura framework is available (with or without getToken)
-        """
-        try:
-            result = page.evaluate("""
-                () => {
-                    try {
-                        // Check for $A existence
-                        if (typeof window.$A !== 'undefined' && window.$A !== null) {
-                            return {
-                                available: true,
-                                hasGetToken: typeof window.$A.getToken === 'function',
-                                hasGetContext: typeof window.$A.getContext === 'function',
-                                type: typeof window.$A
-                            };
-                        }
-                        // Check for Aura existence as fallback
-                        if (typeof window.Aura !== 'undefined' && window.Aura !== null) {
-                            return {
-                                available: true,
-                                hasGetToken: false,
-                                hasGetContext: false,
-                                type: 'Aura object'
-                            };
-                        }
-                        return { available: false };
-                    } catch (e) {
-                        return { available: false, error: e.message };
-                    }
-                }
-            """)
-
-            if result.get('available'):
-                logger.debug(f"  Aura available: hasGetToken={result.get('hasGetToken')}, hasGetContext={result.get('hasGetContext')}")
-                return True
-            return False
-
-        except Exception as e:
-            logger.debug(f"  Error checking Aura availability: {e}")
-            return False
-
-    def _wait_for_aura(self, page: Page, timeout: int = 10000) -> bool:
-        """Wait for Aura framework to become available.
-
-        Args:
-            page: Playwright page object
-            timeout: Maximum time to wait in milliseconds
-
-        Returns:
-            bool: True if Aura became available, False if timeout
-        """
-        try:
-            page.wait_for_function(
-                """() => {
-                    return typeof window.$A !== 'undefined' &&
-                           typeof window.$A.getToken === 'function';
-                }""",
-                timeout=timeout
-            )
-            logger.info("  Aura framework is now available")
-            return True
-        except PlaywrightTimeoutError:
-            logger.warning(f"  Timeout waiting for Aura framework ({timeout}ms)")
-            return False
-
-    def _wait_for_aura_token(self, page: Page, timeout: int = 20000) -> bool:
-        """Wait for Aura token to actually be initialized (not just the function to exist).
-
-        Args:
-            page: Playwright page object
-            timeout: Maximum time to wait in milliseconds
-
-        Returns:
-            bool: True if token became available, False if timeout
-        """
-        try:
-            # Wait for token to actually be available (not just getToken function)
-            page.wait_for_function(
-                """() => {
-                    try {
-                        if (typeof window.$A === 'undefined' || typeof window.$A.getToken !== 'function') {
-                            return false;
-                        }
-                        // Try to get token - if it succeeds without error, token is available
-                        const token = window.$A.getToken();
-                        return token && typeof token === 'string' && token.length > 10;
-                    } catch (e) {
-                        // Token not ready yet
-                        return false;
-                    }
-                }""",
-                timeout=timeout
-            )
-            logger.info("  Aura token is now available")
-            return True
-        except PlaywrightTimeoutError:
-            logger.warning(f"  Timeout waiting for Aura token ({timeout}ms)")
-            return False
-
     def _extract_tokens_from_storage(self, page: Page) -> Optional[Dict[str, str]]:
         """Extract tokens from localStorage and sessionStorage.
-
+        
+        This is the PRIMARY and MOST RELIABLE extraction method based on successful
+        authentication logs. The token is typically found in:
+        - localStorage['$AuraClientService.token$siteforce:communityApp']
+        
         Args:
             page: Playwright page object
 
@@ -787,43 +634,69 @@ class HallmarkAuthenticator:
             result = page.evaluate("""
                 () => {
                     const tokens = {};
-                    const storageKeys = [
-                        'aura.token', 'auraToken', 'sfdc.auraToken',
-                        'fwuid', 'aura.context', 'auraContext'
+                    
+                    // PRIMARY: Check for known working key pattern first (most reliable)
+                    // Based on successful auth logs: $AuraClientService.token$siteforce:communityApp
+                    const knownPatterns = [
+                        '$AuraClientService.token$siteforce:communityApp',
+                        '$AuraClientService.token',
+                        'aura.token',
+                        'auraToken',
+                        'sfdc.auraToken'
                     ];
-
-                    // Check localStorage
-                    for (const key of storageKeys) {
-                        const value = localStorage.getItem(key);
-                        if (value) {
-                            tokens['localStorage_' + key] = value;
+                    
+                    // Check localStorage for known patterns first
+                    for (const pattern of knownPatterns) {
+                        const value = localStorage.getItem(pattern);
+                        if (value && value.length > 10) {
+                            tokens['localStorage_' + pattern] = value;
+                            // Found primary token, can return early if we have it
                         }
                     }
-
-                    // Check sessionStorage
-                    for (const key of storageKeys) {
-                        const value = sessionStorage.getItem(key);
-                        if (value) {
-                            tokens['sessionStorage_' + key] = value;
+                    
+                    // Check sessionStorage for known patterns
+                    for (const pattern of knownPatterns) {
+                        const value = sessionStorage.getItem(pattern);
+                        if (value && value.length > 10) {
+                            tokens['sessionStorage_' + pattern] = value;
                         }
                     }
-
-                    // Also check for any key containing 'token' or 'session'
+                    
+                    // SECONDARY: Check for any key containing 'token' and 'aura' (broader search)
                     for (let i = 0; i < localStorage.length; i++) {
                         const key = localStorage.key(i);
-                        if (key && (key.toLowerCase().includes('token') ||
-                                   key.toLowerCase().includes('session') ||
-                                   key.toLowerCase().includes('aura'))) {
-                            tokens['localStorage_' + key] = localStorage.getItem(key);
+                        if (key && key.toLowerCase().includes('token') && 
+                            (key.toLowerCase().includes('aura') || 
+                             key.toLowerCase().includes('client'))) {
+                            const value = localStorage.getItem(key);
+                            if (value && value.length > 10) {
+                                tokens['localStorage_' + key] = value;
+                            }
                         }
                     }
 
                     for (let i = 0; i < sessionStorage.length; i++) {
                         const key = sessionStorage.key(i);
-                        if (key && (key.toLowerCase().includes('token') ||
-                                   key.toLowerCase().includes('session') ||
-                                   key.toLowerCase().includes('aura'))) {
-                            tokens['sessionStorage_' + key] = sessionStorage.getItem(key);
+                        if (key && key.toLowerCase().includes('token') && 
+                            (key.toLowerCase().includes('aura') || 
+                             key.toLowerCase().includes('client'))) {
+                            const value = sessionStorage.getItem(key);
+                            if (value && value.length > 10) {
+                                tokens['sessionStorage_' + key] = value;
+                            }
+                        }
+                    }
+                    
+                    // TERTIARY: Look for fwuid and context
+                    const contextKeys = ['fwuid', 'aura.context', 'auraContext'];
+                    for (const key of contextKeys) {
+                        const value = localStorage.getItem(key);
+                        if (value) {
+                            tokens['localStorage_' + key] = value;
+                        }
+                        const sessValue = sessionStorage.getItem(key);
+                        if (sessValue) {
+                            tokens['sessionStorage_' + key] = sessValue;
                         }
                     }
 
@@ -866,869 +739,6 @@ class HallmarkAuthenticator:
             logger.warning(f"  ✗ Storage extraction method failed with exception: {e}")
 
         return None
-
-    def _initialize_aura_with_session(self, page: Page, url_tokens: Dict[str, str]) -> Optional[Dict[str, str]]:
-        """Try to initialize Aura framework using the session ID from URL.
-
-        This navigates to a page that should trigger Aura initialization.
-
-        Args:
-            page: Playwright page object
-            url_tokens: Tokens extracted from URL (contains session_id)
-
-        Returns:
-            Dict with tokens, or None if extraction still fails
-        """
-        logger.info("  Trying Aura initialization method: initialize Aura with session ID")
-        try:
-            # Navigate to the main app page which should initialize Aura
-            app_url = f"{self.base_url}/s/"
-            logger.info(f"  Navigating to {app_url} to initialize Aura...")
-
-            page.goto(app_url, wait_until="domcontentloaded", timeout=30000)
-
-            # Wait for network to settle
-            try:
-                page.wait_for_load_state("networkidle", timeout=20000)
-            except PlaywrightTimeoutError:
-                logger.warning("  Network idle timeout during Aura initialization")
-
-            # Wait for Aura framework to be available
-            if not self._wait_for_aura(page, timeout=15000):
-                logger.warning("  Aura framework not available after navigation")
-            else:
-                # Try to trigger token initialization by interacting with the page
-                logger.info("  Attempting to trigger token initialization...")
-                try:
-                    # Scroll the page to trigger any lazy-loaded content
-                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                    page.wait_for_timeout(1000)
-                    # Try clicking on the page to trigger events
-                    page.evaluate("document.body.click()")
-                    page.wait_for_timeout(1000)
-                except Exception as e:
-                    logger.debug(f"  Error during page interaction: {e}")
-
-                # Wait for token to actually be initialized (not just function to exist)
-                logger.info("  Waiting for Aura token to be initialized...")
-                if self._wait_for_aura_token(page, timeout=20000):
-                    # Token is ready, try JS extraction
-                    tokens = self._extract_tokens_js(page)
-                    if tokens:
-                        logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID")
-                        tokens['session_id'] = url_tokens.get('session_id', '')
-                        tokens['org_id'] = url_tokens.get('org_id', '')
-                        return tokens
-                else:
-                    logger.warning("  Token not initialized yet, trying extraction anyway...")
-                    # Try JS extraction even if token wait timed out
-                    tokens = self._extract_tokens_js(page)
-                    if tokens:
-                        logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID (after timeout)")
-                        tokens['session_id'] = url_tokens.get('session_id', '')
-                        tokens['org_id'] = url_tokens.get('org_id', '')
-                        return tokens
-
-            # Try waiting a bit longer and retry
-            logger.info("  Waiting additional time for page to fully initialize...")
-            page.wait_for_timeout(5000)  # Wait 5 more seconds
-            
-            # Try JS extraction again after additional wait
-            tokens = self._extract_tokens_js(page)
-            if tokens:
-                logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID (after additional wait)")
-                tokens['session_id'] = url_tokens.get('session_id', '')
-                tokens['org_id'] = url_tokens.get('org_id', '')
-                return tokens
-
-            # Last resort: try regex on this page
-            tokens = self._extract_tokens_regex(page)
-            if tokens:
-                logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID (regex fallback)")
-                tokens['session_id'] = url_tokens.get('session_id', '')
-                tokens['org_id'] = url_tokens.get('org_id', '')
-                return tokens
-
-            logger.warning("  ✗ Aura initialization method failed - could not extract tokens after navigation and retries")
-
-        except Exception as e:
-            logger.warning(f"  ✗ Aura initialization method failed with exception: {e}")
-
-        return None
-
-    def _extract_tokens_js(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract tokens using JavaScript execution with multiple safe methods.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with token, context, and fwuid, or None if extraction fails
-        """
-        # First, log what Aura properties are available for debugging
-        self._log_aura_properties(page)
-
-        # Try multiple extraction methods in order of preference
-        # Start with safest optional chaining methods first
-        methods = [
-            ("$A?.getContext?.()?.getToken?.() (safe)", self._extract_via_safe_context_getToken),
-            ("$A.getToken()", self._extract_via_getToken),
-            ("$A.getContext().getToken()", self._extract_via_context_getToken),
-            ("$A.get('$Storage')", self._extract_via_storage_get),
-            ("Aura.token property", self._extract_via_aura_token_property),
-            ("Window Aura object", self._extract_via_window_aura),
-            ("$A.storageService", self._extract_via_storage_service),
-        ]
-
-        for method_name, method_func in methods:
-            try:
-                logger.info(f"  Trying Aura extraction method: {method_name}")
-                result = method_func(page)
-                if result and result.get("token"):
-                    logger.info(f"  ✓ Successfully extracted tokens via: {method_name}")
-                    return result
-                else:
-                    if result and result.get("error"):
-                        logger.warning(f"  ✗ Method {method_name} failed: {result['error']}")
-                    else:
-                        logger.warning(f"  ✗ Method {method_name} returned no token")
-            except Exception as e:
-                logger.warning(f"  ✗ Method {method_name} failed with exception: {e}")
-
-        logger.warning("  ✗ All JavaScript Aura extraction methods failed")
-        return None
-
-    def _log_aura_properties(self, page: Page) -> None:
-        """Log available Aura framework properties for debugging.
-
-        Args:
-            page: Playwright page object
-        """
-        try:
-            result = page.evaluate("""
-                () => {
-                    const info = {
-                        hasWindow$A: typeof window.$A !== 'undefined',
-                        hasWindowAura: typeof window.Aura !== 'undefined',
-                        $A_type: typeof window.$A,
-                        $A_keys: [],
-                        $A_methods: [],
-                        context_keys: [],
-                        context_methods: [],
-                        errors: []
-                    };
-
-                    try {
-                        // Get $A properties
-                        if (window.$A) {
-                            for (const key in window.$A) {
-                                try {
-                                    const type = typeof window.$A[key];
-                                    if (type === 'function') {
-                                        info.$A_methods.push(key);
-                                    } else {
-                                        info.$A_keys.push(key + ':' + type);
-                                    }
-                                } catch (e) {
-                                    info.errors.push('$A.' + key + ': ' + e.message);
-                                }
-                            }
-
-                            // Check specific important methods
-                            info.hasGetToken = typeof window.$A.getToken === 'function';
-                            info.hasGetContext = typeof window.$A.getContext === 'function';
-                            info.hasGet = typeof window.$A.get === 'function';
-
-                            // Try to get context info
-                            if (typeof window.$A.getContext === 'function') {
-                                try {
-                                    const ctx = window.$A.getContext();
-                                    if (ctx) {
-                                        info.contextExists = true;
-                                        for (const key in ctx) {
-                                            try {
-                                                const type = typeof ctx[key];
-                                                if (type === 'function') {
-                                                    info.context_methods.push(key);
-                                                } else {
-                                                    info.context_keys.push(key + ':' + type);
-                                                }
-                                            } catch (e) {
-                                                info.errors.push('context.' + key + ': ' + e.message);
-                                            }
-                                        }
-                                        // Check for specific context properties
-                                        info.context_hasFwuid = 'fwuid' in ctx;
-                                        info.context_hasToken = 'token' in ctx;
-                                        info.context_hasGetToken = typeof ctx.getToken === 'function';
-                                        info.context_hasEncodeForServer = typeof ctx.encodeForServer === 'function';
-                                    }
-                                } catch (e) {
-                                    info.errors.push('getContext(): ' + e.message);
-                                }
-                            }
-                        }
-
-                        // Check window.Aura
-                        if (window.Aura) {
-                            info.Aura_keys = Object.keys(window.Aura).slice(0, 20);
-                        }
-
-                    } catch (e) {
-                        info.errors.push('Main loop: ' + e.message);
-                    }
-
-                    return info;
-                }
-            """)
-
-            logger.info("  === Aura Framework Properties ===")
-            logger.info(f"    window.$A exists: {result.get('hasWindow$A')}")
-            logger.info(f"    window.Aura exists: {result.get('hasWindowAura')}")
-            logger.info(f"    $A type: {result.get('$A_type')}")
-
-            if result.get('$A_methods'):
-                logger.info(f"    $A methods: {', '.join(result['$A_methods'][:15])}")
-            if result.get('$A_keys'):
-                logger.info(f"    $A properties: {', '.join(result['$A_keys'][:10])}")
-
-            logger.info(f"    $A.getToken exists: {result.get('hasGetToken')}")
-            logger.info(f"    $A.getContext exists: {result.get('hasGetContext')}")
-            logger.info(f"    $A.get exists: {result.get('hasGet')}")
-
-            if result.get('contextExists'):
-                logger.info(f"    Context exists: True")
-                logger.info(f"    Context.fwuid exists: {result.get('context_hasFwuid')}")
-                logger.info(f"    Context.token exists: {result.get('context_hasToken')}")
-                logger.info(f"    Context.getToken exists: {result.get('context_hasGetToken')}")
-                logger.info(f"    Context.encodeForServer exists: {result.get('context_hasEncodeForServer')}")
-                if result.get('context_methods'):
-                    logger.info(f"    Context methods: {', '.join(result['context_methods'][:10])}")
-
-            if result.get('Aura_keys'):
-                logger.info(f"    window.Aura keys: {', '.join(result['Aura_keys'][:10])}")
-
-            if result.get('errors'):
-                logger.warning(f"    Errors during inspection: {result['errors']}")
-
-            logger.info("  === End Aura Properties ===")
-
-        except Exception as e:
-            logger.warning(f"  Error logging Aura properties: {e}")
-
-    def _extract_via_safe_context_getToken(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract token using safe optional chaining: $A?.getContext?.()?.getToken?.()
-
-        This is the safest method that won't throw if any part of the chain is undefined.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with tokens or None
-        """
-        result = page.evaluate("""
-            () => {
-                try {
-                    // Use safe optional chaining - won't throw if any part is undefined
-                    const token = window.$A?.getContext?.()?.getToken?.();
-                    
-                    if (!token || typeof token !== 'string') {
-                        return { error: 'Safe optional chaining returned no valid token' };
-                    }
-
-                    let context = null;
-                    let fwuid = null;
-
-                    // Try to get context and fwuid safely
-                    try {
-                        const ctx = window.$A?.getContext?.();
-                        if (ctx) {
-                            // Try encodeForServer
-                            if (typeof ctx.encodeForServer === 'function') {
-                                try {
-                                    context = ctx.encodeForServer();
-                                } catch (e) {
-                                    // Try JSON.stringify as fallback
-                                    try {
-                                        context = JSON.stringify(ctx);
-                                    } catch (e2) {
-                                        // Ignore encoding errors
-                                    }
-                                }
-                            }
-                            // Get fwuid
-                            if (ctx.fwuid) {
-                                fwuid = ctx.fwuid;
-                            }
-                        }
-                    } catch (e) {
-                        // Context extraction failed, but we have token
-                    }
-
-                    return {
-                        token: token,
-                        context: context,
-                        fwuid: fwuid
-                    };
-                } catch (e) {
-                    return { 
-                        error: `Safe extraction failed: ${e.message || String(e)}`,
-                        stack: e.stack || ''
-                    };
-                }
-            }
-        """)
-
-        if result and result.get("error"):
-            error_msg = result['error']
-            if result.get("stack"):
-                error_msg += f" (stack: {result['stack']})"
-            logger.warning(f"  _extract_via_safe_context_getToken error: {error_msg}")
-            return None
-
-        if result and result.get("token"):
-            return {
-                "token": result["token"],
-                "context": result.get("context") or "",
-                "fwuid": result.get("fwuid") or ""
-            }
-        return None
-
-    def _extract_via_getToken(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract token using $A.getToken() method.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with tokens or None
-        """
-        result = page.evaluate("""
-            () => {
-                try {
-                    if (!window.$A) {
-                        return { error: '$A not defined' };
-                    }
-                    if (typeof window.$A.getToken !== 'function') {
-                        return { error: '$A.getToken is not a function' };
-                    }
-
-                    const token = window.$A.getToken();
-                    if (!token) {
-                        return { error: '$A.getToken() returned null/undefined' };
-                    }
-
-                    let context = null;
-                    let fwuid = null;
-
-                    // Try to get context
-                    if (typeof window.$A.getContext === 'function') {
-                        try {
-                            const ctx = window.$A.getContext();
-                            if (ctx) {
-                                // Try encodeForServer
-                                if (typeof ctx.encodeForServer === 'function') {
-                                    try {
-                                        context = ctx.encodeForServer();
-                                    } catch (e) {
-                                        // Try JSON.stringify as fallback
-                                        try {
-                                            context = JSON.stringify(ctx);
-                                        } catch (e2) {}
-                                    }
-                                }
-                                // Get fwuid
-                                if (ctx.fwuid) {
-                                    fwuid = ctx.fwuid;
-                                }
-                            }
-                        } catch (e) {
-                            // Context extraction failed, but we have token
-                        }
-                    }
-
-                    return {
-                        token: token,
-                        context: context,
-                        fwuid: fwuid
-                    };
-                } catch (e) {
-                    return { 
-                        error: `$A.getToken() failed: ${e.message || String(e)}`,
-                        stack: e.stack || ''
-                    };
-                }
-            }
-        """)
-
-        if result and result.get("error"):
-            error_msg = result['error']
-            if result.get("stack"):
-                error_msg += f" (stack: {result['stack']})"
-            logger.warning(f"  _extract_via_getToken error: {error_msg}")
-            return None
-
-        if result and result.get("token"):
-            return {
-                "token": result["token"],
-                "context": result.get("context") or "",
-                "fwuid": result.get("fwuid") or ""
-            }
-        return None
-
-    def _extract_via_context_getToken(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract token using $A.getContext().getToken() method.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with tokens or None
-        """
-        result = page.evaluate("""
-            () => {
-                try {
-                    if (!window.$A) {
-                        return { error: '$A not defined' };
-                    }
-                    if (typeof window.$A.getContext !== 'function') {
-                        return { error: '$A.getContext is not a function' };
-                    }
-
-                    const ctx = window.$A.getContext();
-                    if (!ctx) {
-                        return { error: 'getContext() returned null' };
-                    }
-
-                    let token = null;
-
-                    // Try getToken method on context
-                    if (typeof ctx.getToken === 'function') {
-                        token = ctx.getToken();
-                    }
-
-                    // Try token property
-                    if (!token && ctx.token) {
-                        token = ctx.token;
-                    }
-
-                    if (!token) {
-                        return { error: 'No token found on context' };
-                    }
-
-                    let context = null;
-                    let fwuid = ctx.fwuid || null;
-
-                    // Try to encode context
-                    if (typeof ctx.encodeForServer === 'function') {
-                        try {
-                            context = ctx.encodeForServer();
-                        } catch (e) {}
-                    }
-
-                    return {
-                        token: token,
-                        context: context,
-                        fwuid: fwuid
-                    };
-                } catch (e) {
-                    return { 
-                        error: `$A.getContext().getToken() failed: ${e.message || String(e)}`,
-                        stack: e.stack || ''
-                    };
-                }
-            }
-        """)
-
-        if result and result.get("error"):
-            error_msg = result['error']
-            if result.get("stack"):
-                error_msg += f" (stack: {result['stack']})"
-            logger.warning(f"  _extract_via_context_getToken error: {error_msg}")
-            return None
-
-        if result and result.get("token"):
-            return {
-                "token": result["token"],
-                "context": result.get("context") or "",
-                "fwuid": result.get("fwuid") or ""
-            }
-        return None
-
-    def _extract_via_aura_token_property(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract token from Aura object properties.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with tokens or None
-        """
-        result = page.evaluate("""
-            () => {
-                try {
-                    let token = null;
-                    let fwuid = null;
-                    let context = null;
-
-                    // Check window.Aura
-                    if (window.Aura) {
-                        if (window.Aura.token) token = window.Aura.token;
-                        if (window.Aura.fwuid) fwuid = window.Aura.fwuid;
-                        if (window.Aura.context) {
-                            try {
-                                context = JSON.stringify(window.Aura.context);
-                            } catch (e) {}
-                        }
-                    }
-
-                    // Check $A properties directly
-                    if (!token && window.$A) {
-                        if (window.$A.token) token = window.$A.token;
-                        if (window.$A.fwuid) fwuid = window.$A.fwuid;
-                    }
-
-                    if (!token) {
-                        return { error: 'No token property found' };
-                    }
-
-                    return {
-                        token: token,
-                        context: context,
-                        fwuid: fwuid
-                    };
-                } catch (e) {
-                    return { 
-                        error: `Aura.token property extraction failed: ${e.message || String(e)}`,
-                        stack: e.stack || ''
-                    };
-                }
-            }
-        """)
-
-        if result and result.get("error"):
-            error_msg = result['error']
-            if result.get("stack"):
-                error_msg += f" (stack: {result['stack']})"
-            logger.warning(f"  _extract_via_aura_token_property error: {error_msg}")
-            return None
-
-        if result and result.get("token"):
-            return {
-                "token": result["token"],
-                "context": result.get("context") or "",
-                "fwuid": result.get("fwuid") or ""
-            }
-        return None
-
-    def _extract_via_window_aura(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract token from various window-level Aura objects.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with tokens or None
-        """
-        result = page.evaluate("""
-            () => {
-                try {
-                    // Search for token in various places
-                    const locations = [
-                        () => window.$A && window.$A.clientService && window.$A.clientService.token,
-                        () => window.$A && window.$A.services && window.$A.services.client && window.$A.services.client.token,
-                        () => window.aura && window.aura.token,
-                        () => window.Aura && window.Aura.initConfig && window.Aura.initConfig.token,
-                    ];
-
-                    for (const loc of locations) {
-                        try {
-                            const token = loc();
-                            if (token && typeof token === 'string') {
-                                return { token: token, context: null, fwuid: null };
-                            }
-                        } catch (e) {}
-                    }
-
-                    return { error: 'No token found in window Aura objects' };
-                } catch (e) {
-                    return { 
-                        error: `Window Aura object extraction failed: ${e.message || String(e)}`,
-                        stack: e.stack || ''
-                    };
-                }
-            }
-        """)
-
-        if result and result.get("error"):
-            error_msg = result['error']
-            if result.get("stack"):
-                error_msg += f" (stack: {result['stack']})"
-            logger.warning(f"  _extract_via_window_aura error: {error_msg}")
-            return None
-
-        if result and result.get("token"):
-            return {
-                "token": result["token"],
-                "context": result.get("context") or "",
-                "fwuid": result.get("fwuid") or ""
-            }
-        return None
-
-    def _extract_via_storage_get(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract token using $A.get("$Storage") method.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with tokens or None
-        """
-        result = page.evaluate("""
-            () => {
-                try {
-                    if (!window.$A) {
-                        return { error: '$A not defined' };
-                    }
-
-                    // Try $A.get("$Storage") - safer with optional chaining
-                    if (typeof window.$A.get === 'function') {
-                        try {
-                            const storage = window.$A.get("$Storage");
-                            if (storage && typeof storage === 'object') {
-                                // Look for token-related keys
-                                const keys = Object.keys(storage);
-                                for (const key of keys) {
-                                    if (key.toLowerCase().includes('token')) {
-                                        const value = storage[key];
-                                        if (value && typeof value === 'string' && value.length > 10) {
-                                            // Also try to get context and fwuid
-                                            let context = null;
-                                            let fwuid = null;
-                                            
-                                            // Try to get context from storage
-                                            if (storage.context) {
-                                                try {
-                                                    context = typeof storage.context === 'string' 
-                                                        ? storage.context 
-                                                        : JSON.stringify(storage.context);
-                                                } catch (e) {}
-                                            }
-                                            
-                                            // Try to get fwuid
-                                            if (storage.fwuid) {
-                                                fwuid = storage.fwuid;
-                                            }
-                                            
-                                            return { 
-                                                token: value, 
-                                                context: context, 
-                                                fwuid: fwuid 
-                                            };
-                                        }
-                                    }
-                                }
-                            }
-                        } catch (e) {
-                            return { error: `$A.get("$Storage") failed: ${e.message || String(e)}` };
-                        }
-                    }
-
-                    return { error: '$A.get is not a function or storage not found' };
-                } catch (e) {
-                    return { 
-                        error: `Storage get extraction failed: ${e.message || String(e)}`,
-                        stack: e.stack || ''
-                    };
-                }
-            }
-        """)
-
-        if result and result.get("error"):
-            error_msg = result['error']
-            if result.get("stack"):
-                error_msg += f" (stack: {result['stack']})"
-            logger.warning(f"  _extract_via_storage_get error: {error_msg}")
-            return None
-
-        if result and result.get("token"):
-            return {
-                "token": result["token"],
-                "context": result.get("context") or "",
-                "fwuid": result.get("fwuid") or ""
-            }
-        return None
-
-    def _extract_via_storage_service(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract token from Aura storage service.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with tokens or None
-        """
-        result = page.evaluate("""
-            () => {
-                try {
-                    if (!window.$A) {
-                        return { error: '$A not defined' };
-                    }
-
-                    // Try storageService
-                    if (window.$A.storageService) {
-                        try {
-                            const svc = window.$A.storageService;
-                            if (svc.getStorage) {
-                                const storage = svc.getStorage('actions');
-                                if (storage && storage.token) {
-                                    return { token: storage.token, context: null, fwuid: null };
-                                }
-                            }
-                        } catch (e) {
-                            return { error: `storageService.getStorage failed: ${e.message || String(e)}` };
-                        }
-                    }
-
-                    return { error: 'No token found in storage service' };
-                } catch (e) {
-                    return { 
-                        error: `Storage service extraction failed: ${e.message || String(e)}`,
-                        stack: e.stack || ''
-                    };
-                }
-            }
-        """)
-
-        if result and result.get("error"):
-            error_msg = result['error']
-            if result.get("stack"):
-                error_msg += f" (stack: {result['stack']})"
-            logger.warning(f"  _extract_via_storage_service error: {error_msg}")
-            return None
-
-        if result and result.get("token"):
-            return {
-                "token": result["token"],
-                "context": result.get("context") or "",
-                "fwuid": result.get("fwuid") or ""
-            }
-        return None
-
-    def _extract_tokens_from_page_source(self, page: Page) -> Optional[Dict[str, str]]:
-        """Extract tokens from page source HTML with comprehensive scanning.
-
-        This method does a deep scan of the page source looking for tokens in
-        various locations including script tags, inline JavaScript, and data attributes.
-
-        Args:
-            page: Playwright page object
-
-        Returns:
-            Dict with token, context, and fwuid, or None if extraction fails
-        """
-        logger.info("  Trying page source extraction method: deep page source scan")
-        try:
-            content = page.content()
-
-            # Enhanced token patterns - more comprehensive
-            token_patterns = [
-                # JWT token patterns (most reliable for Salesforce Lightning)
-                (r'"token"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"]*)"', "JWT token in JSON"),
-                (r'token\s*[=:]\s*["\']?(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"\']*)["\']?', "JWT token assignment"),
-                # Standard aura.token patterns
-                (r'"aura\.token"\s*:\s*"([^"]+)"', "aura.token JSON"),
-                (r'aura\.token\s*=\s*["\']([^"\']+)["\']', "aura.token assignment"),
-                (r'["\']aura\.token["\']\s*:\s*["\']([^"\']+)["\']', "aura.token quoted key"),
-                # Token in context objects
-                (r'"context"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "token in context object"),
-                (r'"context"\s*:\s*\{[^}]*"fwuid"\s*:\s*"([^"]+)"[^}]*"token"\s*:\s*"([^"]+)"', "token in context with fwuid"),
-                # Token in config object (non-JWT, longer strings)
-                (r'"token"\s*:\s*"([^"]{20,200})"', "token JSON property (20-200 chars)"),
-                # Aura config patterns
-                (r'Aura\.initConfig\s*=\s*\{[^}]*"token"\s*:\s*"([^"]+)"', "Aura.initConfig token"),
-                (r'Aura\.initConfig\s*=\s*\{[^}]*token\s*:\s*["\']([^"\']+)["\']', "Aura.initConfig token (unquoted)"),
-                # Token in appBootstrap
-                (r'"appBootstrap"[^}]*"token"\s*:\s*"([^"]+)"', "appBootstrap token"),
-                (r'appBootstrap[^}]*token\s*:\s*["\']([^"\']+)["\']', "appBootstrap token (unquoted)"),
-                # Token in script tags
-                (r'<script[^>]*>.*?"token"\s*:\s*"([^"]+)"', "token in script tag"),
-                # CSRF token patterns
-                (r'"csrfToken"\s*:\s*"([^"]+)"', "csrfToken"),
-                (r'csrfToken\s*[=:]\s*["\']([^"\']+)["\']', "csrfToken assignment"),
-                # Lightning context token
-                (r'"TOKEN"\s*:\s*"([^"]+)"', "TOKEN property"),
-                # Token in data attributes
-                (r'data-token\s*=\s*["\']([^"\']+)["\']', "data-token attribute"),
-            ]
-
-            # Enhanced fwuid patterns
-            fwuid_patterns = [
-                (r'"fwuid"\s*:\s*"([^"]+)"', "fwuid JSON"),
-                (r'fwuid\s*=\s*["\']([^"\']+)["\']', "fwuid assignment"),
-                (r'"FWUID"\s*:\s*"([^"]+)"', "FWUID property"),
-                (r'"context"\s*:\s*\{[^}]*"fwuid"\s*:\s*"([^"]+)"', "fwuid in context object"),
-            ]
-
-            # Enhanced context patterns
-            context_patterns = [
-                (r'"aura\.context"\s*:\s*(\{[^}]+\})', "aura.context JSON"),
-                (r'aura\.context\s*=\s*(\{[^}]+\})', "aura.context assignment"),
-                (r'"context"\s*:\s*(\{[^}]{50,500}\})', "context object (50-500 chars)"),
-            ]
-
-            token = None
-            fwuid = None
-            context = None
-
-            # Try each token pattern
-            for pattern, name in token_patterns:
-                match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
-                if match:
-                    # Handle patterns with multiple groups (e.g., context with fwuid and token)
-                    if len(match.groups()) > 1:
-                        # Last group is usually the token
-                        token = match.group(len(match.groups()))
-                    else:
-                        token = match.group(1)
-                    
-                    if token and len(token) >= 10:  # Valid tokens are at least 10 chars
-                        logger.info(f"    Found token via pattern '{name}': {token[:50]}...")
-                        break
-
-            # Try each fwuid pattern
-            for pattern, name in fwuid_patterns:
-                match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
-                if match:
-                    fwuid = match.group(1)
-                    logger.info(f"    Found fwuid via pattern '{name}': {fwuid}")
-                    break
-
-            # Try each context pattern
-            for pattern, name in context_patterns:
-                match = re.search(pattern, content, re.IGNORECASE | re.DOTALL)
-                if match:
-                    context = match.group(1)
-                    logger.info(f"    Found context via pattern '{name}'")
-                    break
-
-            if token:
-                logger.info("  ✓ Successfully extracted tokens via: deep page source scan")
-                return {
-                    "token": token,
-                    "context": context or "",
-                    "fwuid": fwuid or ""
-                }
-
-            logger.warning("  ✗ Page source extraction found no tokens via enhanced patterns")
-            return None
-
-        except Exception as e:
-            logger.warning(f"  ✗ Page source extraction method failed with exception: {e}")
-            return None
-
-    def _extract_tokens_regex(self, page: Page) -> Optional[Dict[str, str]]:
         """Extract tokens using regex patterns from page content.
 
         Args:

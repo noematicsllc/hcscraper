@@ -29,39 +29,18 @@ The Hallmark Connect scraper uses Salesforce Aura framework authentication with 
 
 #### Token Extraction Methods (in order of preference):
 
-1. **`$A?.getContext?.()?.getToken?.()` (Safe Optional Chaining)**
-   - Safest method using optional chaining
-   - Won't throw if any part of the chain is undefined
-   - **This is the preferred method**
+**PRIMARY METHOD (Most Reliable):**
 
-2. **`$A.getToken()`**
-   - Direct method call
-   - Requires `window.$A` and `getToken` function to exist
+1. **localStorage/sessionStorage extraction** ⭐ **PRIMARY METHOD**
+   - **This is the most reliable method based on successful authentication logs**
+   - Token is typically found in: `localStorage['$AuraClientService.token$siteforce:communityApp']`
+   - Checks known working key patterns first, then broader search
+   - Fast, reliable, and doesn't depend on Aura framework initialization
+   - **This method is tried FIRST before all JavaScript methods**
 
-3. **`$A.getContext().getToken()`**
-   - Gets token from context object
-   - Requires context object to have `getToken` method
+**FALLBACK METHODS (in order):**
 
-4. **`$A.get("$Storage")`**
-   - Retrieves token from Aura storage
-   - Looks for token-related keys in storage object
-
-5. **Aura.token property**
-   - Direct property access on `window.Aura` or `window.$A`
-   - Checks `Aura.token` and `$A.token`
-
-6. **Window Aura objects**
-   - Searches various nested locations:
-     - `window.$A.clientService.token`
-     - `window.$A.services.client.token`
-     - `window.aura.token`
-     - `window.Aura.initConfig.token`
-
-7. **Storage service**
-   - Uses `$A.storageService.getStorage('actions')`
-   - Looks for token in storage
-
-8. **Page source regex extraction**
+2. **Regex extraction from page source** (fallback)
    - Deep scan of HTML page source
    - Multiple regex patterns for tokens in:
      - JSON objects
@@ -92,10 +71,18 @@ The Hallmark Connect scraper uses Salesforce Aura framework authentication with 
 
 ## Common Token Locations
 
-### JavaScript Objects
+### Storage (PRIMARY METHOD)
 
 ```javascript
-// Primary locations (in order of reliability):
+// PRIMARY: Most reliable method - token found in localStorage
+localStorage.getItem('$AuraClientService.token$siteforce:communityApp')
+// Or search for keys containing 'token' and 'aura'/'client'
+```
+
+### JavaScript Objects (FALLBACK - often fails)
+
+```javascript
+// Fallback locations (in order of reliability):
 window.$A?.getContext?.()?.getToken?.()  // SAFEST - use optional chaining
 window.$A.getToken()
 window.$A.getContext().getToken()
