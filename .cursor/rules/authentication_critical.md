@@ -27,31 +27,28 @@ The Hallmark Connect scraper uses Salesforce Aura framework authentication with 
 
 **The Salesforce Aura API REQUIRES a valid `aura.token` field.** Empty tokens cause the API to return empty responses (status 200, empty body), which results in JSON decode errors.
 
-#### Token Extraction Methods (in order of preference):
+#### Token Extraction Methods:
 
-**PRIMARY METHOD (Most Reliable):**
+**ONLY WORKING METHOD:**
 
-1. **localStorage/sessionStorage extraction** ⭐ **PRIMARY METHOD**
-   - **This is the most reliable method based on successful authentication logs**
+1. **localStorage/sessionStorage extraction** ⭐ **ONLY RELIABLE METHOD**
+   - **This is the ONLY method that works in practice**
    - Token is typically found in: `localStorage['$AuraClientService.token$siteforce:communityApp']`
    - Checks known working key patterns first, then broader search
    - Fast, reliable, and doesn't depend on Aura framework initialization
-   - **This method is tried FIRST before all JavaScript methods**
+   - **All JavaScript-based methods have been removed** - they fail in practice
+   - **Regex/page source extraction methods have been removed** - they were never reached in logs
 
-**FALLBACK METHODS (in order):**
+**SUPPLEMENTARY METHODS (for context, not token):**
 
-2. **Regex extraction from page source** (fallback)
-   - Deep scan of HTML page source
-   - Multiple regex patterns for tokens in:
-     - JSON objects
-     - Inline JavaScript
-     - Script tags
-     - Data attributes
-   - Patterns include:
-     - JWT tokens: `eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+`
-     - `aura.token` assignments
-     - Context objects with tokens
-     - Config objects
+2. **URL parameter extraction** (for session ID only)
+   - Extracts Salesforce session ID (`sid`) and org ID (`oid`) from URL parameters
+   - Does NOT extract Aura token - only provides session context
+   - Used to supplement storage-extracted tokens with session metadata
+
+3. **FWUID extraction from page** (for context only)
+   - Extracts framework unique identifier via regex from page source
+   - Used for debugging and context, not required for authentication
 
 #### Required Tokens
 
@@ -71,52 +68,50 @@ The Hallmark Connect scraper uses Salesforce Aura framework authentication with 
 
 ## Common Token Locations
 
-### Storage (PRIMARY METHOD)
+### Storage (ONLY WORKING METHOD)
 
 ```javascript
-// PRIMARY: Most reliable method - token found in localStorage
+// ONLY RELIABLE METHOD - token found in localStorage
 localStorage.getItem('$AuraClientService.token$siteforce:communityApp')
-// Or search for keys containing 'token' and 'aura'/'client'
+
+// Also checks these patterns:
+// - '$AuraClientService.token'
+// - 'aura.token'
+// - 'auraToken'
+// - 'sfdc.auraToken'
+// - Any key containing 'token' and ('aura' or 'client')
+
+// Checks both localStorage and sessionStorage
+sessionStorage.getItem('$AuraClientService.token$siteforce:communityApp')
 ```
 
-### JavaScript Objects (FALLBACK - often fails)
+### JavaScript Objects (REMOVED - DO NOT USE)
+
+**All JavaScript-based extraction methods have been removed** because they fail in practice:
+- `window.$A?.getContext?.()?.getToken?.()` - fails
+- `window.$A.getToken()` - fails
+- `window.$A.getContext().getToken()` - fails
+- `window.$A.get("$Storage")` - fails
+- `window.Aura.token` - fails
+- `window.$A.token` - fails
+
+**These methods were removed based on authentication logs showing consistent failures.**
+
+### Page Source Patterns (REMOVED - DO NOT USE)
+
+**Regex extraction from page source has been removed** because:
+- Storage extraction always succeeds, so regex methods are never reached
+- Regex extraction was never used in successful authentication logs
+- Storage extraction is faster and more reliable
+
+### URL Parameters (For Session Context Only)
 
 ```javascript
-// Fallback locations (in order of reliability):
-window.$A?.getContext?.()?.getToken?.()  // SAFEST - use optional chaining
-window.$A.getToken()
-window.$A.getContext().getToken()
-window.$A.get("$Storage")
-window.Aura.token
-window.$A.token
+// Extract from URL query parameters (NOT the Aura token):
+// ?sid=... (Salesforce session ID)
+// ?oid=... (Organization ID)
+// These are used for session context, not authentication
 ```
-
-### Page Source Patterns
-
-```html
-<!-- In script tags -->
-<script>
-  aura.token = "eyJ...";
-  "token": "eyJ...",
-  "fwuid": "...",
-  "context": {"fwuid": "...", "token": "..."}
-</script>
-
-<!-- In data attributes -->
-<div data-token="eyJ..."></div>
-
-<!-- In JSON config -->
-Aura.initConfig = {"token": "eyJ..."}
-```
-
-### Regex Patterns
-
-Common patterns found in page source:
-
-- JWT tokens: `"token"\s*:\s*"(eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+[^"]*)"`
-- Aura token: `"aura\.token"\s*:\s*"([^"]+)"`
-- Context object: `"context"\s*:\s*\{[^}]*"token"\s*:\s*"([^"]+)"`
-- FWUID: `"fwuid"\s*:\s*"([^"]+)"`
 
 ## Error Handling
 
@@ -195,10 +190,12 @@ logger.info(f"  ✓ Successfully extracted tokens via: {method_name}")
 ### Key Files
 
 - `src/auth/authenticator.py`: Main authentication logic
-  - `_extract_tokens()`: Main extraction coordinator
-  - `_extract_tokens_js()`: JavaScript extraction methods
-  - `_extract_tokens_regex()`: Regex extraction from page source
-  - `_extract_tokens_from_page_source()`: Deep page source scan
+  - `_extract_tokens()`: Main extraction coordinator (only uses storage method)
+  - `_extract_tokens_from_storage()`: **ONLY WORKING METHOD** - localStorage/sessionStorage extraction
+  - `_extract_tokens_from_url()`: Extracts session ID from URL (supplementary, not for token)
+  - `_extract_fwuid_from_page()`: Extracts FWUID via regex (for context only)
+  - **REMOVED**: All JavaScript-based extraction methods (they fail in practice)
+  - **REMOVED**: Regex/page source extraction methods (never reached in logs)
 
 - `src/api/client.py`: API client using tokens
   - `HallmarkAPIClient.__init__()`: Initializes with tokens
@@ -211,32 +208,39 @@ logger.info(f"  ✓ Successfully extracted tokens via: {method_name}")
 
 **DO NOT modify without thorough testing:**
 
-1. Token extraction fallback logic (lines ~425-441 in `authenticator.py`)
-   - **MUST fail if no token found**
-   - **MUST NOT allow empty tokens**
+1. Token extraction logic (`_extract_tokens()` in `authenticator.py`)
+   - **ONLY uses storage extraction method** - all other methods removed
+   - **MUST fail if storage extraction fails** - no fallback to empty tokens
+   - **MUST NOT allow empty tokens** - authentication fails if token not found
 
-2. API request building (lines ~200-205 in `request_builder.py`)
+2. Storage extraction (`_extract_tokens_from_storage()` in `authenticator.py`)
+   - **ONLY RELIABLE METHOD** - checks localStorage/sessionStorage
+   - Checks known working key patterns first, then broader search
+   - **MUST return None if no token found** - triggers authentication failure
+
+3. API request building (lines ~200-205 in `request_builder.py`)
    - **MUST include `aura.token` field**
    - **MUST NOT be empty string**
 
-3. Error handling in `_execute_request()` (lines ~383-403 in `client.py`)
+4. Error handling in `_execute_request()` (lines ~383-403 in `client.py`)
    - **MUST detect empty responses**
    - **MUST log detailed error information**
 
 ## Best Practices
 
-1. **Always use optional chaining** when accessing Aura objects
+1. **ONLY use storage extraction** - all other methods have been removed
    ```javascript
-   window.$A?.getContext?.()?.getToken?.()
+   // ONLY WORKING METHOD:
+   localStorage.getItem('$AuraClientService.token$siteforce:communityApp')
    ```
 
 2. **Log detailed errors** including stack traces
    ```python
-   logger.warning(f"Error: {error_msg} (stack: {stack})")
+   logger.error(f"Error: {error_msg}", exc_info=True)
    ```
 
 3. **Test token extraction** after any changes
-   - Verify tokens are extracted successfully
+   - Verify tokens are extracted successfully from storage
    - Verify tokens are not empty
    - Verify API calls work with extracted tokens
 
@@ -244,6 +248,8 @@ logger.info(f"  ✓ Successfully extracted tokens via: {method_name}")
    - Update this file
    - Add comments in code
    - Test thoroughly before committing
+
+5. **DO NOT add back removed methods** - JavaScript and regex extraction methods were removed because they fail in practice
 
 ## Session Persistence
 
@@ -258,13 +264,18 @@ Sessions are saved to `sessions/hallmark_session.json` to skip MFA on subsequent
 
 ### Token extraction fails
 
-1. Check browser console for JavaScript errors
-2. Verify Aura framework is loaded: `window.$A` exists
-3. Check page source for token patterns
-4. Try manual extraction in browser console:
+1. Check browser storage for token:
    ```javascript
-   window.$A?.getContext?.()?.getToken?.()
+   // In browser console:
+   localStorage.getItem('$AuraClientService.token$siteforce:communityApp')
+   // Or check all localStorage keys:
+   Object.keys(localStorage).filter(k => k.includes('token') && k.includes('aura'))
    ```
+
+2. Verify you're on the authenticated page (`/s/`) after login
+3. Check authentication logs for storage extraction details
+4. Verify session cookies are present (check browser DevTools)
+5. **DO NOT try JavaScript methods** - they have been removed because they fail
 
 ### API returns empty responses
 
@@ -294,6 +305,14 @@ Sessions are saved to `sessions/hallmark_session.json` to skip MFA on subsequent
 - **Root Cause**: Assumed session cookies alone sufficient, but API requires `aura.token`
 - **Fix**: Removed empty token fallback, improved extraction methods, added comprehensive error logging
 - **Lesson**: **Never allow empty tokens - API requires valid token**
+
+### 2025-01: Method Cleanup - Removed Failed Extraction Methods
+- **Issue**: Multiple token extraction methods existed but only storage extraction worked
+- **Symptom**: JavaScript-based methods consistently failed in authentication logs
+- **Root Cause**: JavaScript methods (`window.$A.getToken()`, etc.) fail in practice; regex methods never reached
+- **Fix**: Removed all JavaScript-based extraction methods and regex/page source extraction methods
+- **Current State**: Only `_extract_tokens_from_storage()` remains - the ONLY reliable method
+- **Lesson**: **Remove code that doesn't work - don't keep fallbacks that never succeed**
 
 ---
 
