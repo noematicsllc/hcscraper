@@ -32,15 +32,21 @@ services:
       # Mount session directory for persistence across container restarts
       # Note: session file will be created inside this directory
       - ./sessions:/app/sessions
+      # Mount logs directory so log files are accessible on host
+      - ./logs:/app/logs
       # Mount .env file (make sure it exists on host)
       - ./.env:/app/.env:ro
       # Mount search results directory for CSV-based order extraction
       - ./search_results:/app/search_results:ro
+      # Mount debug responses directory for debugging failed API calls
+      - ./debug_responses:/app/debug_responses
     environment:
       # Override OUTPUT_DIRECTORY to use mounted volume
       - OUTPUT_DIRECTORY=/app/data
       # Session file path inside the mounted sessions directory
       - SESSION_FILE=/app/sessions/hallmark_session.json
+      # Log file path inside the mounted logs directory
+      - LOG_FILE=/app/logs/hallmark_scraper.log
       # Default database URL (can be overridden in .env)
       - DATABASE_URL=postgresql://hallmark:hallmark@postgres:5432/hallmark_orders
     # Interactive mode settings (enables MFA input and real-time progress display)

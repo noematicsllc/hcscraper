@@ -13,12 +13,12 @@ class AuraRequestBuilder:
 
         Args:
             base_url: Base URL for Hallmark Connect
-            aura_token: Aura authentication token (can be empty if using session auth)
+            aura_token: Aura authentication token (REQUIRED - cannot be empty)
             aura_context: Aura context (encoded, can be empty)
             fwuid: Framework unique identifier (can be empty)
         """
         self.base_url = base_url.rstrip('/')
-        self.aura_token = aura_token or ''  # Empty string is OK for session-based auth
+        self.aura_token = aura_token or ''  # Note: Empty tokens cause API failures - authenticator should prevent this
         self.aura_context = aura_context or ''
         self.fwuid = fwuid or ''
         self.request_counter = 81  # Initial request number

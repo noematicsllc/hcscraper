@@ -18,10 +18,13 @@ hallmark_session.json
 
 # Data and logs
 data/
+search_results/
 reports/
+logs/
 *.log
 *.json.bak
 checkpoint.json
+debug_responses/
 
 # Playwright
 .playwright/

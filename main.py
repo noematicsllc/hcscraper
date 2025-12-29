@@ -253,7 +253,8 @@ def main():
 
     # Setup logging
     log_level = args.log_level or config.log_level
-    setup_logging(log_level=log_level, log_to_console=True)
+    log_file = str(config.log_file) if config.log_file else None
+    setup_logging(log_level=log_level, log_file=log_file, log_to_console=True)
 
     print("=" * 60)
     print("Hallmark Connect Order Data Scraper")
@@ -315,7 +316,7 @@ def main():
 
     tokens = authenticator.get_tokens()
     
-    # Aura tokens are optional - session-based auth works with just sid cookie
+    # Create API client with extracted tokens (authenticator ensures tokens are not empty)
     api_client = HallmarkAPIClient(
         session=authenticator.get_session(),
         aura_token=tokens.get('token', ''),

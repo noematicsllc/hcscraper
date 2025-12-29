@@ -88,6 +88,17 @@ class Config:
         """Logging level."""
         return os.getenv("LOG_LEVEL", "INFO").upper()
 
+    @property
+    def log_file(self) -> Optional[Path]:
+        """Path to log file (optional)."""
+        path_str = os.getenv("LOG_FILE")
+        if not path_str:
+            return None
+        path = Path(path_str)
+        # Create parent directory if it doesn't exist
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
     # Timeout settings
     @property
     def request_timeout_seconds(self) -> float:

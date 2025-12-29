@@ -61,7 +61,7 @@ class HallmarkAPIClient:
 
         Args:
             session: Authenticated requests session (with sid cookie for auth)
-            aura_token: Aura authentication token (can be empty if using session auth)
+            aura_token: Aura authentication token (REQUIRED - cannot be empty)
             aura_context: Aura context (encoded, can be empty)
             fwuid: Framework unique identifier (can be empty)
             base_url: Base URL for Hallmark Connect
@@ -126,9 +126,9 @@ class HallmarkAPIClient:
         if aura_token:
             logger.debug("API client initialized with Aura token authentication")
         else:
-            logger.info("API client using session-based authentication (no Aura token)")
+            logger.warning("API client initialized without Aura token - this may cause API failures")
 
-        # Create request builder (handles empty tokens gracefully)
+        # Create request builder
         self.request_builder = AuraRequestBuilder(
             base_url=base_url,
             aura_token=aura_token or '',

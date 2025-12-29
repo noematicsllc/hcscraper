@@ -326,22 +326,80 @@ class HallmarkAuthenticator:
                     logger.warning("  Network idle timeout - continuing anyway")
                 logger.info(f"  Final URL: {page.url}")
 
+                # Step 7.5: Save browser session NOW (before token extraction)
+                # This allows us to reuse the authenticated session even if token extraction fails
+                # The cookies are already authenticated after SAML redirect, so save them immediately
+                if save_session:
+                    logger.info("Step 7.5: Saving authenticated session (cookies from SAML redirect)...")
+                    self._save_browser_state(context)
+                    logger.info("  ✓ Session saved - can reuse without MFA if token extraction fails")
+
+                # Step 7.6: Wait for frontdoor.jsp to redirect to /s/, or navigate manually
+                # frontdoor.jsp is a redirect handler that should automatically redirect to /s/
+                # We wait for this redirect to complete, but if it doesn't happen, we navigate manually
+                logger.info("Step 7.6: Waiting for redirect to main app page (/s/)...")
+                current_url = page.url
+                
+                # Check if we're on frontdoor.jsp - if so, wait for automatic redirect
+                if "frontdoor.jsp" in current_url or "secur/frontdoor" in current_url:
+                    logger.info("  On frontdoor.jsp - waiting for automatic redirect to /s/...")
+                    try:
+                        # Wait for URL to change away from frontdoor.jsp (should redirect to /s/)
+                        page.wait_for_function(
+                            """() => {
+                                const url = window.location.href;
+                                return !url.includes('frontdoor.jsp') && !url.includes('secur/frontdoor');
+                            }""",
+                            timeout=10000
+                        )
+                        logger.info(f"  Automatic redirect completed: {page.url}")
+                    except PlaywrightTimeoutError:
+                        logger.warning("  Automatic redirect timed out, navigating manually...")
+                        # If automatic redirect didn't happen, navigate manually
+                        app_url = f"{self.base_url}/s/"
+                        page.goto(app_url, wait_until="networkidle", timeout=30000)
+                        logger.info(f"  Manually navigated to: {page.url}")
+                else:
+                    # Already on /s/ or another page, just ensure we're on /s/
+                    if "/s/" not in current_url:
+                        logger.info("  Not on /s/, navigating to main app page...")
+                        app_url = f"{self.base_url}/s/"
+                        page.goto(app_url, wait_until="networkidle", timeout=30000)
+                        logger.info(f"  Navigated to: {page.url}")
+                    else:
+                        logger.info(f"  Already on /s/: {page.url}")
+                
+                # Wait for network to settle and Aura to initialize
+                try:
+                    page.wait_for_load_state("networkidle", timeout=20000)
+                except PlaywrightTimeoutError:
+                    logger.warning("  Network idle timeout - continuing anyway")
+                
+                # Give Aura time to fully initialize after networkidle
+                page.wait_for_timeout(2000)
+
                 # Step 8: Extract tokens
                 logger.info("Step 8: Extracting session tokens...")
                 self._tokens = self._extract_tokens(page)
 
                 if not self._tokens:
-                    raise Exception("Failed to extract authentication tokens")
+                    # Token extraction failed, but we have saved session - try using saved session
+                    logger.warning("  Token extraction failed, but session is saved.")
+                    logger.info("  Attempting to extract tokens using saved session...")
+                    browser.close()  # Close current browser
+                    
+                    # Try using saved session to extract tokens
+                    if self.authenticate_with_saved_session():
+                        logger.info("  ✓ Successfully extracted tokens using saved session!")
+                        return True
+                    else:
+                        raise Exception("Failed to extract authentication tokens (even with saved session)")
 
                 logger.info("  Token extraction successful")
 
                 # Step 9: Create requests session with cookies
                 logger.info("Step 9: Creating requests session with cookies...")
                 self._session = self._create_session(page)
-
-                # Save browser session for future use
-                if save_session:
-                    self._save_browser_state(context)
 
                 logger.info("✓ Authentication completed successfully")
                 return True
@@ -388,50 +446,65 @@ class HallmarkAuthenticator:
             self._wait_for_aura(page)
 
         # Method 3: Try JavaScript extraction for Aura tokens
+        logger.info("Method 3: Attempting JavaScript Aura extraction...")
         tokens = self._extract_tokens_js(page)
         if tokens:
+            logger.info("  ✓ JavaScript Aura extraction succeeded")
             # Merge with any URL tokens we found
             if url_tokens:
                 tokens['session_id'] = url_tokens.get('session_id', '')
                 tokens['org_id'] = url_tokens.get('org_id', '')
             return tokens
+        else:
+            logger.warning("  ✗ JavaScript Aura extraction failed - no tokens extracted")
 
         # Method 4: Try localStorage/sessionStorage
-        logger.warning("JavaScript Aura extraction failed, trying storage...")
+        logger.info("Method 4: Attempting storage extraction (localStorage/sessionStorage)...")
         storage_tokens = self._extract_tokens_from_storage(page)
         if storage_tokens:
+            logger.info("  ✓ Storage extraction succeeded")
             if url_tokens:
                 storage_tokens['session_id'] = url_tokens.get('session_id', '')
                 storage_tokens['org_id'] = url_tokens.get('org_id', '')
             return storage_tokens
+        else:
+            logger.warning("  ✗ Storage extraction failed - no tokens found in storage")
 
         # Method 5: Fallback to regex extraction from page source
-        logger.warning("Storage extraction failed, trying regex fallback...")
+        logger.info("Method 5: Attempting regex extraction from page source...")
         regex_tokens = self._extract_tokens_regex(page)
         if regex_tokens:
+            logger.info("  ✓ Regex extraction succeeded")
             if url_tokens:
                 regex_tokens['session_id'] = url_tokens.get('session_id', '')
                 regex_tokens['org_id'] = url_tokens.get('org_id', '')
             return regex_tokens
+        else:
+            logger.warning("  ✗ Regex extraction failed - no tokens found via regex patterns")
 
         # Method 6: If we have URL tokens but couldn't get Aura tokens,
         # try navigating to a page that will initialize Aura
         if url_tokens:
-            logger.info("  Have session ID but no Aura tokens, attempting to initialize Aura...")
+            logger.info("Method 6: Attempting Aura initialization with session ID...")
             aura_tokens = self._initialize_aura_with_session(page, url_tokens)
             if aura_tokens:
+                logger.info("  ✓ Aura initialization succeeded")
                 return aura_tokens
+            else:
+                logger.warning("  ✗ Aura initialization failed - could not initialize Aura with session")
 
             # Method 7: Last resort - try to extract token from page source HTML
             # This is a fallback when JavaScript methods fail
-            logger.warning("  All JavaScript extraction methods failed, trying deep page source scan...")
+            logger.info("Method 7: Attempting deep page source scan...")
             page_source_tokens = self._extract_tokens_from_page_source(page)
             if page_source_tokens and page_source_tokens.get("token"):
-                logger.info("  ✓ Successfully extracted tokens from page source")
+                logger.info("  ✓ Deep page source scan succeeded")
                 if url_tokens:
                     page_source_tokens['session_id'] = url_tokens.get('session_id', '')
                     page_source_tokens['org_id'] = url_tokens.get('org_id', '')
                 return page_source_tokens
+            else:
+                logger.warning("  ✗ Deep page source scan failed - no tokens found in page source")
 
             # Method 8: CRITICAL - Do NOT allow empty tokens
             # The Salesforce Aura API requires a valid aura.token field.
@@ -666,6 +739,40 @@ class HallmarkAuthenticator:
             logger.warning(f"  Timeout waiting for Aura framework ({timeout}ms)")
             return False
 
+    def _wait_for_aura_token(self, page: Page, timeout: int = 20000) -> bool:
+        """Wait for Aura token to actually be initialized (not just the function to exist).
+
+        Args:
+            page: Playwright page object
+            timeout: Maximum time to wait in milliseconds
+
+        Returns:
+            bool: True if token became available, False if timeout
+        """
+        try:
+            # Wait for token to actually be available (not just getToken function)
+            page.wait_for_function(
+                """() => {
+                    try {
+                        if (typeof window.$A === 'undefined' || typeof window.$A.getToken !== 'function') {
+                            return false;
+                        }
+                        // Try to get token - if it succeeds without error, token is available
+                        const token = window.$A.getToken();
+                        return token && typeof token === 'string' && token.length > 10;
+                    } catch (e) {
+                        // Token not ready yet
+                        return false;
+                    }
+                }""",
+                timeout=timeout
+            )
+            logger.info("  Aura token is now available")
+            return True
+        except PlaywrightTimeoutError:
+            logger.warning(f"  Timeout waiting for Aura token ({timeout}ms)")
+            return False
+
     def _extract_tokens_from_storage(self, page: Page) -> Optional[Dict[str, str]]:
         """Extract tokens from localStorage and sessionStorage.
 
@@ -675,6 +782,7 @@ class HallmarkAuthenticator:
         Returns:
             Dict with tokens, or None if not found
         """
+        logger.info("  Trying storage extraction method: localStorage/sessionStorage")
         try:
             result = page.evaluate("""
                 () => {
@@ -743,14 +851,19 @@ class HallmarkAuthenticator:
                         context = value
 
                 if token:
+                    logger.info("  ✓ Successfully extracted tokens via: localStorage/sessionStorage")
                     return {
                         'token': token,
                         'context': context or '',
                         'fwuid': fwuid or ''
                     }
+                else:
+                    logger.warning("  ✗ Storage extraction found items but no valid token")
+            else:
+                logger.warning("  ✗ Storage extraction found no items in localStorage/sessionStorage")
 
         except Exception as e:
-            logger.warning(f"Error extracting tokens from storage: {e}")
+            logger.warning(f"  ✗ Storage extraction method failed with exception: {e}")
 
         return None
 
@@ -766,6 +879,7 @@ class HallmarkAuthenticator:
         Returns:
             Dict with tokens, or None if extraction still fails
         """
+        logger.info("  Trying Aura initialization method: initialize Aura with session ID")
         try:
             # Navigate to the main app page which should initialize Aura
             app_url = f"{self.base_url}/s/"
@@ -775,28 +889,70 @@ class HallmarkAuthenticator:
 
             # Wait for network to settle
             try:
-                page.wait_for_load_state("networkidle", timeout=15000)
+                page.wait_for_load_state("networkidle", timeout=20000)
             except PlaywrightTimeoutError:
                 logger.warning("  Network idle timeout during Aura initialization")
 
-            # Wait for Aura to become available
-            if self._wait_for_aura(page, timeout=15000):
-                # Try JS extraction again
-                tokens = self._extract_tokens_js(page)
-                if tokens:
-                    tokens['session_id'] = url_tokens.get('session_id', '')
-                    tokens['org_id'] = url_tokens.get('org_id', '')
-                    return tokens
+            # Wait for Aura framework to be available
+            if not self._wait_for_aura(page, timeout=15000):
+                logger.warning("  Aura framework not available after navigation")
+            else:
+                # Try to trigger token initialization by interacting with the page
+                logger.info("  Attempting to trigger token initialization...")
+                try:
+                    # Scroll the page to trigger any lazy-loaded content
+                    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+                    page.wait_for_timeout(1000)
+                    # Try clicking on the page to trigger events
+                    page.evaluate("document.body.click()")
+                    page.wait_for_timeout(1000)
+                except Exception as e:
+                    logger.debug(f"  Error during page interaction: {e}")
 
-            # Last resort: try regex on this page
-            tokens = self._extract_tokens_regex(page)
+                # Wait for token to actually be initialized (not just function to exist)
+                logger.info("  Waiting for Aura token to be initialized...")
+                if self._wait_for_aura_token(page, timeout=20000):
+                    # Token is ready, try JS extraction
+                    tokens = self._extract_tokens_js(page)
+                    if tokens:
+                        logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID")
+                        tokens['session_id'] = url_tokens.get('session_id', '')
+                        tokens['org_id'] = url_tokens.get('org_id', '')
+                        return tokens
+                else:
+                    logger.warning("  Token not initialized yet, trying extraction anyway...")
+                    # Try JS extraction even if token wait timed out
+                    tokens = self._extract_tokens_js(page)
+                    if tokens:
+                        logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID (after timeout)")
+                        tokens['session_id'] = url_tokens.get('session_id', '')
+                        tokens['org_id'] = url_tokens.get('org_id', '')
+                        return tokens
+
+            # Try waiting a bit longer and retry
+            logger.info("  Waiting additional time for page to fully initialize...")
+            page.wait_for_timeout(5000)  # Wait 5 more seconds
+            
+            # Try JS extraction again after additional wait
+            tokens = self._extract_tokens_js(page)
             if tokens:
+                logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID (after additional wait)")
                 tokens['session_id'] = url_tokens.get('session_id', '')
                 tokens['org_id'] = url_tokens.get('org_id', '')
                 return tokens
 
+            # Last resort: try regex on this page
+            tokens = self._extract_tokens_regex(page)
+            if tokens:
+                logger.info("  ✓ Successfully extracted tokens via: Aura initialization with session ID (regex fallback)")
+                tokens['session_id'] = url_tokens.get('session_id', '')
+                tokens['org_id'] = url_tokens.get('org_id', '')
+                return tokens
+
+            logger.warning("  ✗ Aura initialization method failed - could not extract tokens after navigation and retries")
+
         except Exception as e:
-            logger.error(f"Error during Aura initialization: {e}")
+            logger.warning(f"  ✗ Aura initialization method failed with exception: {e}")
 
         return None
 
@@ -833,13 +989,13 @@ class HallmarkAuthenticator:
                     return result
                 else:
                     if result and result.get("error"):
-                        logger.warning(f"  Method {method_name} error: {result['error']}")
+                        logger.warning(f"  ✗ Method {method_name} failed: {result['error']}")
                     else:
-                        logger.debug(f"  Method {method_name} returned no token")
+                        logger.warning(f"  ✗ Method {method_name} returned no token")
             except Exception as e:
-                logger.error(f"  Method {method_name} exception: {e}", exc_info=True)
+                logger.warning(f"  ✗ Method {method_name} failed with exception: {e}")
 
-        logger.warning("All JavaScript Aura extraction methods failed")
+        logger.warning("  ✗ All JavaScript Aura extraction methods failed")
         return None
 
     def _log_aura_properties(self, page: Page) -> None:
@@ -1472,9 +1628,9 @@ class HallmarkAuthenticator:
         Returns:
             Dict with token, context, and fwuid, or None if extraction fails
         """
+        logger.info("  Trying page source extraction method: deep page source scan")
         try:
             content = page.content()
-            logger.info("  Performing deep page source scan for Aura tokens...")
 
             # Enhanced token patterns - more comprehensive
             token_patterns = [
@@ -1558,18 +1714,18 @@ class HallmarkAuthenticator:
                     break
 
             if token:
-                logger.info("  ✓ Successfully extracted tokens from page source")
+                logger.info("  ✓ Successfully extracted tokens via: deep page source scan")
                 return {
                     "token": token,
                     "context": context or "",
                     "fwuid": fwuid or ""
                 }
 
-            logger.debug("  No token found in page source via enhanced patterns")
+            logger.warning("  ✗ Page source extraction found no tokens via enhanced patterns")
             return None
 
         except Exception as e:
-            logger.error(f"Page source extraction failed: {e}", exc_info=True)
+            logger.warning(f"  ✗ Page source extraction method failed with exception: {e}")
             return None
 
     def _extract_tokens_regex(self, page: Page) -> Optional[Dict[str, str]]:
@@ -1581,9 +1737,9 @@ class HallmarkAuthenticator:
         Returns:
             Dict with token, context, and fwuid, or None if extraction fails
         """
+        logger.info("  Trying regex extraction method: regex patterns from page content")
         try:
             content = page.content()
-            logger.info("  Attempting regex extraction from page source...")
 
             # Multiple token patterns to try
             token_patterns = [
@@ -1651,17 +1807,17 @@ class HallmarkAuthenticator:
                     break
 
             if token:
-                logger.info("  ✓ Successfully extracted tokens via regex")
+                logger.info("  ✓ Successfully extracted tokens via: regex patterns")
                 return {
                     "token": token,
                     "context": context or "",
                     "fwuid": fwuid or ""
                 }
 
-            logger.debug("  No token found via regex patterns")
+            logger.warning("  ✗ Regex extraction found no tokens via regex patterns")
 
         except Exception as e:
-            logger.error(f"Regex token extraction failed: {e}")
+            logger.warning(f"  ✗ Regex extraction method failed with exception: {e}")
 
         return None
 
