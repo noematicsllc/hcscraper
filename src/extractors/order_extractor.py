@@ -193,7 +193,7 @@ class OrderExtractor(BaseExtractor):
             if self.save_json:
                 try:
                     filepath = self.json_writer.save_order(order_id, order_data)
-                    logger.info(f"Successfully extracted order {order_id}, saved to {filepath}")
+                    logger.debug(f"Successfully extracted order {order_id}, saved to {filepath}")
                     return True, False, False  # Success, not validation failure, not skipped
                 except ValueError as e:
                     # ValueError from validation - CRITICAL, stop immediately
@@ -223,7 +223,7 @@ class OrderExtractor(BaseExtractor):
         Returns:
             Dict with extraction statistics
         """
-        logger.info(f"Starting batch extraction of {len(order_ids)} orders")
+        logger.warning(f"Starting batch extraction of {len(order_ids)} orders")
         if not self.update_mode:
             logger.info(
                 "SAFETY: Update mode disabled - existing files will be skipped by default. "
@@ -294,8 +294,12 @@ class OrderExtractor(BaseExtractor):
                 # Reset consecutive failures on success
                 consecutive_failures = 0
 
-            # Log progress
-            logger.info(progress.get_progress_message())
+            # Log detailed progress to file (DEBUG level - not shown on console)
+            logger.debug(progress.get_progress_message())
+            
+            # Log periodic summaries to console (every 10% or every 100 items, whichever is more frequent)
+            if (progress.processed % max(1, min(100, progress.total // 10)) == 0) or progress.processed == progress.total:
+                logger.warning(progress.get_progress_message())
 
         # Get summary
         summary = progress.get_summary()
@@ -323,7 +327,7 @@ class OrderExtractor(BaseExtractor):
                     f"Remaining orders can be resumed by running the same command again."
                 )
 
-        logger.info(
+        logger.warning(
             f"Batch extraction complete: {summary['successful']} successful, "
             f"{summary['skipped']} skipped (already exist), "
             f"{summary['failed']} failed out of {summary['processed']} processed "

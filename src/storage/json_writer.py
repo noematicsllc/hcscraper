@@ -460,7 +460,7 @@ class JSONWriter:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(flattened, f, indent=2, ensure_ascii=False)
 
-            logger.info(f"Saved order {order_id} to {filepath}")
+            logger.debug(f"Saved order {order_id} to {filepath}")
             return filepath
 
         except IOError as e:
@@ -492,7 +492,7 @@ class JSONWriter:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(flattened, f, indent=2, ensure_ascii=False)
 
-            logger.info(f"Saved billing document {billing_document_id} to {filepath}")
+            logger.debug(f"Saved billing document {billing_document_id} to {filepath}")
             return filepath
 
         except IOError as e:
@@ -527,7 +527,7 @@ class JSONWriter:
             with open(filepath, 'w', encoding='utf-8') as f:
                 json.dump(output, f, indent=2, ensure_ascii=False)
 
-            logger.info(f"Saved delivery {delivery_id} to {filepath}")
+            logger.debug(f"Saved delivery {delivery_id} to {filepath}")
             return filepath
 
         except IOError as e:

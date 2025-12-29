@@ -69,7 +69,7 @@ class BillingDocumentExtractor(BaseExtractor):
             if self.save_json:
                 try:
                     filepath = self.json_writer.save_billing_document(billing_document_id, billing_data)
-                    logger.info(f"Successfully extracted billing document {billing_document_id}, saved to {filepath}")
+                    logger.debug(f"Successfully extracted billing document {billing_document_id}, saved to {filepath}")
                     return True
                 except Exception as e:
                     logger.error(f"Failed to save JSON for billing document {billing_document_id}: {e}")
@@ -91,7 +91,7 @@ class BillingDocumentExtractor(BaseExtractor):
         Returns:
             Dict with extraction statistics
         """
-        logger.info(f"Starting batch extraction of {len(billing_document_ids)} billing documents")
+        logger.warning(f"Starting batch extraction of {len(billing_document_ids)} billing documents")
         if not self.update_mode:
             logger.info("Update mode disabled - existing files will be skipped")
 
@@ -125,8 +125,12 @@ class BillingDocumentExtractor(BaseExtractor):
                 # Reset consecutive failures on success
                 consecutive_failures = 0
 
-            # Log progress
-            logger.info(progress.get_progress_message())
+            # Log detailed progress to file (DEBUG level - not shown on console)
+            logger.debug(progress.get_progress_message())
+            
+            # Log periodic summaries to console (every 10% or every 100 items, whichever is more frequent)
+            if (progress.processed % max(1, min(100, progress.total // 10)) == 0) or progress.processed == progress.total:
+                logger.warning(progress.get_progress_message())
 
         # Get summary
         summary = progress.get_summary()
@@ -147,9 +151,9 @@ class BillingDocumentExtractor(BaseExtractor):
                 f"Remaining documents can be resumed by running the same command again."
             )
 
-        logger.info(
+        logger.warning(
             f"Batch extraction complete: {summary['successful']} successful, "
-            f"{summary['failed']} failed out of {summary['processed']} processed "
+            f"{summary['failed']} failed out of {summary['total']} total "
             f"(elapsed: {elapsed_str}, avg: {summary['avg_request_time']:.1f}s/doc)"
         )
 

@@ -82,7 +82,7 @@ class DeliveryExtractor:
         Returns:
             Dict with extraction statistics
         """
-        logger.info(f"Starting batch extraction of {len(delivery_ids)} deliveries")
+        logger.warning(f"Starting batch extraction of {len(delivery_ids)} deliveries")
 
         # Initialize progress tracker
         progress = ProgressTracker(total=len(delivery_ids), item_type="delivery")
@@ -99,8 +99,12 @@ class DeliveryExtractor:
             if not success:
                 failed_delivery_ids.append(delivery_id)
 
-            # Log progress
-            logger.info(progress.get_progress_message())
+            # Log detailed progress to file (DEBUG level - not shown on console)
+            logger.debug(progress.get_progress_message())
+            
+            # Log periodic summaries to console (every 10% or every 100 items, whichever is more frequent)
+            if (progress.processed % max(1, min(100, progress.total // 10)) == 0) or progress.processed == progress.total:
+                logger.warning(progress.get_progress_message())
 
         # Get summary
         summary = progress.get_summary()
@@ -114,7 +118,7 @@ class DeliveryExtractor:
         else:
             elapsed_str = f"{elapsed/3600:.1f}h"
 
-        logger.info(
+        logger.warning(
             f"Batch extraction complete: {summary['successful']} successful, "
             f"{summary['failed']} failed out of {summary['total']} total "
             f"(elapsed: {elapsed_str}, avg: {summary['avg_request_time']:.1f}s/delivery)"

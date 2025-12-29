@@ -253,8 +253,8 @@ def main():
 
     # Setup logging
     log_level = args.log_level or config.log_level
-    log_file = str(config.log_file) if config.log_file else None
-    setup_logging(log_level=log_level, log_file=log_file, log_to_console=True)
+    log_dir = config.log_file.parent if config.log_file else Path('./logs')
+    setup_logging(log_level=log_level, log_to_console=True, log_dir=log_dir)
 
     print("=" * 60)
     print("Hallmark Connect Order Data Scraper")
