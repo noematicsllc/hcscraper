@@ -1,123 +1,10 @@
 # Code Smells Analysis
 
-This document identifies 3 code smells found in the codebase and suggests solutions for addressing them.
+This document identifies 2 code smells found in the codebase and suggests solutions for addressing them.
 
 ---
 
-## 1. Duplicated Date Parsing Logic
-
-### Problem
-Date parsing logic is duplicated across multiple files with slightly different implementations:
-
-- **`import_to_postgres.py`** (lines 14-37): `parse_date()` function
-- **`src/storage/json_writer.py`** (lines 105-131): Date parsing in `_extract_date_parts()` method
-
-Both handle similar date formats (MM/DD/YYYY, ISO format, YYYY-MM-DD, timestamps) but with different error handling and return types.
-
-### Impact
-- **Maintenance burden**: Changes to date format handling must be made in multiple places
-- **Inconsistency risk**: Different implementations may handle edge cases differently
-- **Testing overhead**: Each implementation must be tested separately
-- **Bug propagation**: Fixes in one location may not be applied to others
-
-### Solution
-Create a centralized date parsing utility module:
-
-```python
-# src/utils/date_parser.py
-"""Centralized date parsing utilities."""
-
-from datetime import datetime
-from typing import Optional, Tuple
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-def parse_date_string(date_str: str) -> Optional[datetime]:
-    """Parse date string in various formats.
-    
-    Args:
-        date_str: Date string (MM/DD/YYYY, YYYY-MM-DD, ISO format, etc.)
-        
-    Returns:
-        datetime object or None if parsing fails
-    """
-    if not date_str:
-        return None
-    
-    try:
-        # Try MM/DD/YYYY format first
-        if '/' in date_str and len(date_str.split('/')) == 3:
-            return datetime.strptime(date_str, '%m/%d/%Y')
-        # Try ISO format
-        elif 'T' in date_str:
-            return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-        # Try YYYY-MM-DD
-        else:
-            return datetime.strptime(date_str[:10], '%Y-%m-%d')
-    except (ValueError, AttributeError) as e:
-        logger.debug(f"Failed to parse date '{date_str}': {e}")
-        return None
-
-
-def parse_date_value(value: Any) -> Optional[datetime]:
-    """Parse date from various value types.
-    
-    Args:
-        value: Can be string, int (timestamp), float (timestamp), or None
-        
-    Returns:
-        datetime object or None if parsing fails
-    """
-    if value is None:
-        return None
-    
-    if isinstance(value, str):
-        return parse_date_string(value)
-    elif isinstance(value, (int, float)):
-        try:
-            return datetime.fromtimestamp(value)
-        except (ValueError, OSError):
-            return None
-    
-    return None
-
-
-def extract_year_month(date_value: Any) -> Tuple[str, str]:
-    """Extract year and month from date value.
-    
-    Args:
-        date_value: Date string, datetime, timestamp, or None
-        
-    Returns:
-        Tuple of (year, month) as strings (e.g., ("2025", "01"))
-        Falls back to current date if parsing fails
-    """
-    date_obj = None
-    
-    if isinstance(date_value, datetime):
-        date_obj = date_value
-    else:
-        date_obj = parse_date_value(date_value)
-    
-    if date_obj:
-        return date_obj.strftime('%Y'), date_obj.strftime('%m')
-    
-    # Fallback to current date
-    now = datetime.now()
-    return now.strftime('%Y'), now.strftime('%m')
-```
-
-**Refactoring steps:**
-1. Create `src/utils/date_parser.py` with the utility functions
-2. Update `import_to_postgres.py` to use `parse_date_string()` instead of `parse_date()`
-3. Update `json_writer.py` to use `extract_year_month()` and `parse_date_value()` in `_extract_date_parts()`
-4. Add unit tests for the centralized utilities
-
----
-
-## 2. Duplicated Database Connection Logic
+## 1. Duplicated Database Connection Logic
 
 ### Problem
 Both `OrderExtractor` and `BillingDocumentExtractor` contain nearly identical database connection setup and cleanup code:
@@ -247,7 +134,7 @@ class BaseExtractor:
 
 ---
 
-## 3. Long Method with Multiple Responsibilities
+## 2. Long Method with Multiple Responsibilities
 
 ### Problem
 The `_parse_aura_response()` method in `src/api/client.py` (lines 543-654) is approximately 110 lines long and handles multiple responsibilities:
@@ -459,11 +346,24 @@ def _has_expected_structure(self, data: Dict[str, Any]) -> bool:
 
 ## Summary
 
-These three code smells represent common issues that can be addressed through refactoring:
+These two code smells represent common issues that can be addressed through refactoring:
 
-1. **Duplicated date parsing** → Centralize in utility module
-2. **Duplicated database connection** → Extract to base class
-3. **Long method with multiple responsibilities** → Break into smaller, focused methods
+1. **Duplicated database connection** → Extract to base class
+2. **Long method with multiple responsibilities** → Break into smaller, focused methods
 
-All three solutions follow established design principles (DRY, SRP, Single Responsibility) and will improve maintainability, testability, and code clarity.
+All solutions follow established design principles (DRY, SRP, Single Responsibility) and will improve maintainability, testability, and code clarity.
+
+---
+
+## Resolved Issues
+
+### ✅ Duplicated Date Parsing Logic (Resolved)
+**Status**: Implemented and resolved
+
+Date parsing logic has been centralized in `src/utils/date_parser.py` with the following utilities:
+- `parse_date_string()`: Parses date strings in various formats
+- `parse_date_value()`: Parses dates from strings, timestamps, or datetime objects
+- `extract_year_month()`: Extracts year and month from any date value
+
+Both `import_to_postgres.py` and `src/storage/json_writer.py` now use these centralized utilities, eliminating code duplication.
 

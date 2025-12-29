@@ -13,6 +13,7 @@ try:
 except ImportError:
     psycopg = None
 
+from ..utils.date_parser import extract_year_month
 
 logger = logging.getLogger(__name__)
 
@@ -77,58 +78,33 @@ class JSONWriter:
         Returns:
             Tuple of (year, month) as strings (e.g., ("2025", "01"))
         """
-        date_str = None
+        date_value = None
         
         # Try flattened structure first (order and billing document date fields)
         for date_field in ['order_creation_date', 'order_date', 'creation_date', 'requested_delivery_date', 
                            'billing_document_date', 'invoice_due_date', 'document_date']:
             if date_field in order_data and order_data[date_field]:
-                date_str = order_data[date_field]
+                date_value = order_data[date_field]
                 break
         
         # Try nested structure (orderHeader.orderCreationDate) for backwards compatibility during migration
-        if not date_str:
+        if not date_value:
             order_header = order_data.get('orderHeader', {})
             if isinstance(order_header, dict):
                 for date_field in ['orderCreationDate', 'orderDate', 'createdDate', 'requestedDeliveryDate']:
                     if date_field in order_header and order_header[date_field]:
-                        date_str = order_header[date_field]
+                        date_value = order_header[date_field]
                         break
         
         # Try top-level camelCase (for backwards compatibility)
-        if not date_str:
+        if not date_value:
             for date_field in ['orderCreationDate', 'orderDate', 'creationDate']:
                 if date_field in order_data and order_data[date_field]:
-                    date_str = order_data[date_field]
+                    date_value = order_data[date_field]
                     break
 
-        if date_str:
-            try:
-                # Try parsing various date formats
-                if isinstance(date_str, str):
-                    # Handle MM/DD/YYYY format: "09/01/2025"
-                    if '/' in date_str and len(date_str.split('/')) == 3:
-                        date_obj = datetime.strptime(date_str, '%m/%d/%Y')
-                    # Handle ISO format: "2025-01-15T10:30:00" or "2025-01-15"
-                    elif 'T' in date_str:
-                        date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-                    else:
-                        date_obj = datetime.strptime(date_str[:10], '%Y-%m-%d')
-                elif isinstance(date_str, (int, float)):
-                    # Handle timestamp
-                    date_obj = datetime.fromtimestamp(date_str)
-                else:
-                    raise ValueError(f"Unknown date format: {type(date_str)}")
-
-                year = date_obj.strftime('%Y')
-                month = date_obj.strftime('%m')
-                return year, month
-            except (ValueError, AttributeError) as e:
-                logger.warning(f"Failed to parse date '{date_str}': {e}, using current date")
-
-        # Fallback to current date
-        now = datetime.now()
-        return now.strftime('%Y'), now.strftime('%m')
+        # Use centralized date parser utility
+        return extract_year_month(date_value)
 
     def _get_store_number_from_db(self, customer_id: Optional[int]) -> Optional[int]:
         """Get canonical store_number from stores table using customer_id.

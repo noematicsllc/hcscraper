@@ -10,6 +10,8 @@ from datetime import datetime
 import psycopg
 from psycopg.rows import dict_row
 
+from src.utils.date_parser import parse_date_string
+
 
 def parse_date(date_str: str) -> Optional[datetime]:
     """Parse date string in various formats.
@@ -20,21 +22,7 @@ def parse_date(date_str: str) -> Optional[datetime]:
     Returns:
         datetime object or None if parsing fails
     """
-    if not date_str:
-        return None
-    
-    try:
-        # Try MM/DD/YYYY format first
-        if '/' in date_str and len(date_str.split('/')) == 3:
-            return datetime.strptime(date_str, '%m/%d/%Y')
-        # Try ISO format
-        elif 'T' in date_str:
-            return datetime.fromisoformat(date_str.replace('Z', '+00:00'))
-        # Try YYYY-MM-DD
-        else:
-            return datetime.strptime(date_str[:10], '%Y-%m-%d')
-    except (ValueError, AttributeError):
-        return None
+    return parse_date_string(date_str)
 
 
 def parse_decimal(value: str) -> Optional[float]:
