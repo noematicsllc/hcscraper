@@ -1,8 +1,11 @@
 """Salesforce Aura API request builder."""
 
 import json
+import logging
 from typing import Dict, Any, Optional, List, Union
 from urllib.parse import urlencode
+
+logger = logging.getLogger(__name__)
 
 
 class AuraRequestBuilder:
@@ -267,8 +270,17 @@ class AuraRequestBuilder:
         # Convert list to comma-separated string if necessary
         if isinstance(customer_ids, list):
             customer_ids_str = ",".join(customer_ids)
+            logger.debug(f"Converted {len(customer_ids)} customer IDs to comma-separated string (length: {len(customer_ids_str)})")
         else:
             customer_ids_str = customer_ids
+            logger.debug(f"Using customer IDs as string (length: {len(customer_ids_str) if customer_ids_str else 0})")
+
+        # Log customer IDs being used (first few only for brevity)
+        if customer_ids_str:
+            preview = customer_ids_str[:100] + "..." if len(customer_ids_str) > 100 else customer_ids_str
+            logger.debug(f"Search will use customer IDs: {preview}")
+        else:
+            logger.warning("WARNING: No customer IDs provided for search!")
 
         # Build search filters JSON
         search_filters = json.dumps({
@@ -277,6 +289,7 @@ class AuraRequestBuilder:
             "orderCreationStartDate": start_date,
             "orderCreationEndDate": end_date
         })
+        logger.debug(f"Search filters JSON: customerIds length={len(customer_ids_str) if customer_ids_str else 0}, startDate={start_date}, endDate={end_date}")
 
         # Build search sort JSON
         search_sort = json.dumps([
@@ -308,9 +321,97 @@ class AuraRequestBuilder:
             }]
         }
 
+        # Log the pageSize being sent
+        logger.debug(f"Building search request with pageSize={page_size}, pageNumber={page_number}")
+
         return self._build_request(
             message=action_payload,
             page_uri="/s/orders"
+        )
+
+    def build_billing_document_search_request(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        page_size: int = 50,
+        page_number: int = 1,
+        billing_status: str = "All"
+    ) -> Dict[str, Any]:
+        """Build request for billing document search.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            page_size: Number of results per page (default: 50)
+            page_number: Page number to retrieve (default: 1)
+            billing_status: Billing status filter (default: "All")
+
+        Returns:
+            Dict with 'url', 'headers', and 'data' for the request
+        """
+        # Convert list to comma-separated string if necessary
+        if isinstance(customer_ids, list):
+            customer_ids_str = ",".join(customer_ids)
+            logger.debug(f"Converted {len(customer_ids)} customer IDs to comma-separated string (length: {len(customer_ids_str)})")
+        else:
+            customer_ids_str = customer_ids
+            logger.debug(f"Using customer IDs as string (length: {len(customer_ids_str) if customer_ids_str else 0})")
+
+        # Log customer IDs being used (first few only for brevity)
+        if customer_ids_str:
+            preview = customer_ids_str[:100] + "..." if len(customer_ids_str) > 100 else customer_ids_str
+            logger.debug(f"Search will use customer IDs: {preview}")
+        else:
+            logger.warning("WARNING: No customer IDs provided for search!")
+
+        # Build search filters JSON
+        search_filters = json.dumps({
+            "customerIds": customer_ids_str,
+            "customerSearchType": "combobox",
+            "billingDocumentStartDate": start_date,
+            "billingDocumentEndDate": end_date,
+            "billingStatus": billing_status
+        })
+        logger.debug(f"Search filters JSON: customerIds length={len(customer_ids_str) if customer_ids_str else 0}, startDate={start_date}, endDate={end_date}, billingStatus={billing_status}")
+
+        # Build search sort JSON
+        search_sort = json.dumps([
+            {"columnName": "storeName", "sortorder": "asc", "priority": 1},
+            {"columnName": "billingDocumentDate", "sortorder": "Desc", "priority": 2},
+            {"columnName": "billingDocumentNumber", "sortorder": "asc", "priority": 3}
+        ])
+
+        # Build action payload (matching format from actual Hallmark Connect requests)
+        action_payload = {
+            "actions": [{
+                "id": "133;a",
+                "descriptor": "aura://ApexActionController/ACTION$execute",
+                "callingDescriptor": "UNKNOWN",
+                "params": {
+                    "namespace": "",
+                    "classname": "Portal_BillingDocumentsController",
+                    "method": "getBillingDocumentsSAPSearchResult",
+                    "params": {
+                        "pageSize": page_size,
+                        "pageNumber": page_number,
+                        "searchFilters": search_filters,
+                        "searchSort": search_sort,
+                        "searchType": "Invoices",
+                        "cacheable": False,
+                        "isContinuation": False
+                    }
+                }
+            }]
+        }
+
+        # Log the pageSize being sent
+        logger.debug(f"Building billing document search request with pageSize={page_size}, pageNumber={page_number}")
+
+        return self._build_request(
+            message=action_payload,
+            page_uri="/s/billingdocuments"
         )
 
     def build_search_filter_request(

@@ -8,9 +8,9 @@ from dotenv import load_dotenv
 
 # Banner's Hallmark 39 store customer IDs
 BANNER_HALLMARK_CUSTOMER_IDS: List[str] = [
-    "1000055874", "1000004735", "1000041880", "1000019855", "1000030843",
+    "1000055874", "1000004735", "1000041880", "1000030843",
     "1000114306", "1000115859", "1000115805", "1000116758", "1000116745",
-    "1000118749", "1000118750", "1000055291", "1000002154", "1000011835",
+    "1000118750", "1000055291", "1000002154", "1000011835",
     "1000000626", "1000012828", "1000006859", "1000002240", "1000110655",
     "1000019277", "1000019864", "1000008399", "1000054183", "1000003575",
     "1000055311", "1000009732", "1000054184", "1000010181", "1000002149",
@@ -166,8 +166,8 @@ class Config:
 
     @property
     def headless_mode(self) -> bool:
-        """Run browser in headless mode."""
-        value = os.getenv("HEADLESS_MODE", "false").lower()
+        """Run browser in headless mode (default: True)."""
+        value = os.getenv("HEADLESS_MODE", "true").lower()
         return value in ("true", "1", "yes")
 
     @property

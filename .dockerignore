@@ -40,7 +40,9 @@ hallmark_automation_spec.md
 
 # Tests
 tests/
-test_*.py
+# Note: test_auth.py is kept for authentication testing in Docker
+# Exclude other test files
+test_order_recreation.py
 
 # Environment
 .env

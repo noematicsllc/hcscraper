@@ -54,13 +54,13 @@ def main():
         print("Using manual console input for MFA")
         mfa_handler = ConsoleMFAHandler()
 
-    # Create authenticator
+    # Create authenticator (always use headless mode)
     authenticator = HallmarkAuthenticator(
         username=config.username,
         password=config.password,
         mfa_handler=mfa_handler,
         base_url=config.base_url,
-        headless=config.headless_mode
+        headless=True  # Always headless
     )
 
     # Attempt authentication

@@ -330,8 +330,159 @@ class HallmarkAPIClient:
             logger.error(f"Failed to search orders for page {page_number}")
             return None
 
+        # Debug: Log response structure for troubleshooting
+        logger.debug(f"Search response structure: {list(response_data.keys()) if isinstance(response_data, dict) else type(response_data)}")
+        if isinstance(response_data, dict) and 'actions' in response_data:
+            actions = response_data.get('actions', [])
+            if actions and isinstance(actions[0], dict):
+                action = actions[0]
+                return_value = action.get('returnValue')
+                if return_value:
+                    logger.debug(f"Search returnValue keys: {list(return_value.keys()) if isinstance(return_value, dict) else type(return_value)}")
+                    # Log if we see orderRecords or records
+                    if isinstance(return_value, dict):
+                        if 'orderRecords' in return_value:
+                            logger.debug(f"Found orderRecords with {len(return_value.get('orderRecords', []))} items")
+                        if 'records' in return_value:
+                            logger.debug(f"Found records with {len(return_value.get('records', []))} items")
+                        if 'totalRecords' in return_value:
+                            logger.debug(f"totalRecords: {return_value.get('totalRecords')}")
+                        if 'totalCount' in return_value:
+                            logger.debug(f"totalCount: {return_value.get('totalCount')}")
+                        # Log nested result if it exists
+                        if 'result' in return_value:
+                            nested = return_value.get('result')
+                            logger.debug(f"returnValue.result type: {type(nested)}")
+                            if isinstance(nested, dict):
+                                logger.debug(f"returnValue.result keys: {list(nested.keys())}")
+                            elif isinstance(nested, list):
+                                logger.debug(f"returnValue.result is a list with {len(nested)} items")
+
         # Parse Aura response
-        return self._parse_aura_response(response_data, f"search_page_{page_number}")
+        parsed = self._parse_aura_response(response_data, f"search_page_{page_number}")
+        
+        # If parsing returned something but it has no orders, save raw response for debugging
+        if parsed and isinstance(parsed, dict):
+            has_orders = False
+            if 'orderRecords' in parsed or 'records' in parsed:
+                has_orders = True
+            elif 'result' in parsed and isinstance(parsed['result'], (dict, list)):
+                nested = parsed['result']
+                if isinstance(nested, list):
+                    has_orders = len(nested) > 0
+                elif isinstance(nested, dict):
+                    has_orders = 'orderRecords' in nested or 'records' in nested
+            
+            if not has_orders:
+                logger.debug(f"Saving raw search response for debugging (no orders found)")
+                self._save_raw_response_for_debugging(
+                    entity_type="search",
+                    entity_id=f"search_{start_date}_{end_date}_page_{page_number}",
+                    raw_response=response_data,
+                    request_spec=request_spec
+                )
+        
+        return parsed
+
+    def search_billing_documents(
+        self,
+        customer_ids: Union[List[str], str],
+        start_date: str,
+        end_date: str,
+        page_size: int = 50,
+        page_number: int = 1,
+        billing_status: str = "All"
+    ) -> Optional[Dict[str, Any]]:
+        """Search for billing documents matching criteria.
+
+        Args:
+            customer_ids: List of customer IDs or comma-separated string
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            page_size: Number of results per page (default: 50)
+            page_number: Page number to retrieve (default: 1)
+            billing_status: Billing status filter (default: "All")
+
+        Returns:
+            Dict containing search results, or None if request fails
+        """
+        logger.info(f"Searching billing documents from {start_date} to {end_date}, page {page_number}")
+
+        # Build request
+        request_spec = self.request_builder.build_billing_document_search_request(
+            customer_ids=customer_ids,
+            start_date=start_date,
+            end_date=end_date,
+            page_size=page_size,
+            page_number=page_number,
+            billing_status=billing_status
+        )
+
+        # Execute with retry logic (search requests use longer timeout)
+        response_data = self._execute_request(
+            url=request_spec['url'],
+            headers=request_spec['headers'],
+            data=request_spec['data'],
+            request_type=RequestType.SEARCH
+        )
+
+        if response_data is None:
+            logger.error(f"Failed to search billing documents for page {page_number}")
+            return None
+
+        # Debug: Log response structure for troubleshooting
+        logger.debug(f"Search response structure: {list(response_data.keys()) if isinstance(response_data, dict) else type(response_data)}")
+        if isinstance(response_data, dict) and 'actions' in response_data:
+            actions = response_data.get('actions', [])
+            if actions and isinstance(actions[0], dict):
+                action = actions[0]
+                return_value = action.get('returnValue')
+                if return_value:
+                    logger.debug(f"Search returnValue keys: {list(return_value.keys()) if isinstance(return_value, dict) else type(return_value)}")
+                    # Log if we see billing document records
+                    if isinstance(return_value, dict):
+                        if 'billingDocumentRecords' in return_value:
+                            logger.debug(f"Found billingDocumentRecords with {len(return_value.get('billingDocumentRecords', []))} items")
+                        if 'records' in return_value:
+                            logger.debug(f"Found records with {len(return_value.get('records', []))} items")
+                        if 'totalRecords' in return_value:
+                            logger.debug(f"totalRecords: {return_value.get('totalRecords')}")
+                        if 'totalCount' in return_value:
+                            logger.debug(f"totalCount: {return_value.get('totalCount')}")
+                        # Log nested result if it exists
+                        if 'result' in return_value:
+                            nested = return_value.get('result')
+                            logger.debug(f"returnValue.result type: {type(nested)}")
+                            if isinstance(nested, dict):
+                                logger.debug(f"returnValue.result keys: {list(nested.keys())}")
+                            elif isinstance(nested, list):
+                                logger.debug(f"returnValue.result is a list with {len(nested)} items")
+
+        # Parse Aura response
+        parsed = self._parse_aura_response(response_data, f"search_billing_documents_page_{page_number}")
+        
+        # If parsing returned something but it has no billing documents, save raw response for debugging
+        if parsed and isinstance(parsed, dict):
+            has_billing_documents = False
+            if 'billingDocumentRecords' in parsed or 'records' in parsed:
+                has_billing_documents = True
+            elif 'result' in parsed and isinstance(parsed['result'], (dict, list)):
+                nested = parsed['result']
+                if isinstance(nested, list):
+                    has_billing_documents = len(nested) > 0
+                elif isinstance(nested, dict):
+                    has_billing_documents = 'billingDocumentRecords' in nested or 'records' in nested
+            
+            if not has_billing_documents:
+                logger.debug(f"Saving raw search response for debugging (no billing documents found)")
+                self._save_raw_response_for_debugging(
+                    entity_type="search",
+                    entity_id=f"search_billing_documents_{start_date}_{end_date}_page_{page_number}",
+                    raw_response=response_data,
+                    request_spec=request_spec
+                )
+        
+        return parsed
 
     def construct_search_filter_request(
         self,

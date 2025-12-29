@@ -184,17 +184,22 @@ def parse_args():
         action="store_true",
         help="Search and download orders by date range"
     )
+    group.add_argument(
+        "--bulk-billing-documents",
+        action="store_true",
+        help="Search and download billing documents by date range"
+    )
 
-    # Bulk order options
+    # Bulk search options (for both orders and billing documents)
     parser.add_argument(
         "--start-date",
         type=str,
-        help="Start date for bulk order search (YYYY-MM-DD)"
+        help="Start date for bulk search (YYYY-MM-DD)"
     )
     parser.add_argument(
         "--end-date",
         type=str,
-        help="End date for bulk order search (YYYY-MM-DD)"
+        help="End date for bulk search (YYYY-MM-DD)"
     )
     parser.add_argument(
         "--customer-ids",
@@ -204,7 +209,12 @@ def parse_args():
     parser.add_argument(
         "--search-only",
         action="store_true",
-        help="Only search and show summary, don't download orders"
+        help="Only search and show summary, don't download (works for both orders and billing documents)"
+    )
+    parser.add_argument(
+        "--billing-status",
+        type=str,
+        help="Billing status filter for billing document search (default: All)"
     )
 
     # Configuration overrides
@@ -268,6 +278,7 @@ def main():
     from src.api.request_builder import AuraRequestBuilder
     from src.extractors.order_extractor import OrderExtractor
     from src.extractors.bulk_order_extractor import BulkOrderExtractor
+    from src.extractors.bulk_billing_document_extractor import BulkBillingDocumentExtractor
 
     # Step 1: Authenticate
     print("Step 1: Authenticating...")
@@ -573,8 +584,66 @@ def main():
                 
                 return 0 if stats['failed'] == 0 else 1
 
+    elif args.bulk_billing_documents:
+        # Validate required arguments
+        if not args.start_date or not args.end_date:
+            print("✗ --bulk-billing-documents requires --start-date and --end-date")
+            return 1
+
+        # Parse customer IDs if provided
+        customer_ids = None
+        if args.customer_ids:
+            customer_ids = args.customer_ids.split(",")
+
+        # Use bulk billing document extractor with context manager
+        with BulkBillingDocumentExtractor(
+            api_client=api_client,
+            output_directory=output_dir,
+            customer_ids=customer_ids,
+            save_json=True,
+            update_mode=args.update,
+            max_consecutive_failures=args.max_consecutive_failures,
+            billing_status=args.billing_status or "All"
+        ) as bulk_extractor:
+            if args.search_only:
+                # Just show summary
+                summary = bulk_extractor.get_search_summary(args.start_date, args.end_date)
+                if summary:
+                    print(f"\nSearch Summary:")
+                    print(f"  Date range: {summary['start_date']} to {summary['end_date']}")
+                    print(f"  Total billing documents found: {summary['total_billing_documents']}")
+                    print(f"  Customer IDs searched: {summary['customer_ids_count']}")
+                    return 0
+                else:
+                    print("✗ Failed to get search summary")
+                    return 1
+            else:
+                # Search and download
+                print(f"Searching for billing documents from {args.start_date} to {args.end_date}...")
+                stats = bulk_extractor.extract_billing_documents(args.start_date, args.end_date)
+
+                print("\n" + "=" * 60)
+                print("Bulk Extraction Summary")
+                print("=" * 60)
+                print(f"Billing documents found in search: {stats.get('total', 0)}")
+                print(f"Billing documents processed: {stats.get('processed', 0)}")
+                print(f"Successful: {stats['successful']}")
+                print(f"Failed: {stats['failed']}")
+                if stats.get('stopped_early'):
+                    print(f"\n⚠ Extraction stopped early due to consecutive failures")
+                if stats.get('failed_billing_document_ids'):
+                    print(f"\nFailed billing document IDs:")
+                    for bid in stats['failed_billing_document_ids']:
+                        print(f"  - {bid}")
+
+                # Return error code if any failures or if stopped early
+                if stats.get('stopped_early'):
+                    return 1
+                
+                return 0 if stats['failed'] == 0 else 1
+
     else:
-        print("✗ Please specify --order-id, --orders, --resume, or --bulk-orders")
+        print("✗ Please specify --order-id, --orders, --billing-doc-id, --billing-docs-csv, --resume, --bulk-orders, or --bulk-billing-documents")
         return 1
 
 

@@ -6,18 +6,21 @@ Automated extraction system for Hallmark Connect order and sales data. Built to 
 
 - Playwright-based authentication with MFA support
 - Salesforce Aura framework API integration
-- Automatic session token extraction
+- Automatic session token extraction from browser storage
 - Retry logic with exponential backoff
 - Conservative rate limiting with configurable delays
 - Periodic breaks to avoid rate limiting
 - Hierarchical file organization (year/month/store)
 - Bulk order search by date range
 - Single order and batch processing
+- Billing document extraction support
 - PostgreSQL database integration with canonical store names
+- Component-based logging (separate log files per component)
+- Skip existing records by default (use `--update` to re-download)
 
 ## Prerequisites
 
-- Python 3.9+ (project uses 3.13)
+- Python 3.13+
 - uv (for dependency management)
 - Valid Hallmark Connect credentials
 
@@ -73,8 +76,8 @@ REQUEST_TIMEOUT_SECONDS=30
 SEARCH_TIMEOUT_SECONDS=120
 MAX_RETRIES=3
 
-# Browser
-HEADLESS_MODE=false
+# Browser (default: true - always headless)
+HEADLESS_MODE=true
 
 # Database (optional, for canonical store names)
 DATABASE_URL=postgresql://hallmark:hallmark@localhost:5432/hallmark_orders
@@ -112,6 +115,15 @@ Then run:
 python main.py --orders orders.txt
 ```
 
+### Download Orders from Exported CSV
+
+If you've manually exported a CSV of order search results from Hallmark Connect:
+```bash
+python main.py --orders-csv search_results/orders_20251220171139.csv
+```
+
+This reads the "Order #" column from the CSV and downloads each order's full details.
+
 ### Bulk Order Search by Date Range
 
 Search and download orders for a specific date range across all Banner's Hallmark stores:
@@ -129,42 +141,48 @@ Preview search results without downloading:
 python main.py --bulk-orders --start-date 2025-01-01 --end-date 2025-01-31 --search-only
 ```
 
-### Download Orders from Exported CSV
+### Extract Billing Documents
 
-If you've manually exported a CSV of order search results from Hallmark Connect, you can use it directly:
+Single billing document:
 ```bash
-python main.py --orders-csv search_results/orders_20251220171139.csv
+python main.py --billing-doc-id 5055177281
 ```
 
-This reads the "Order #" column from the CSV and downloads each order's full details.
+Multiple billing documents from CSV:
+```bash
+python main.py --billing-docs-csv search_results/billing_documents_202509.csv
+```
 
 ### Command Line Options
 
 ```bash
 python main.py --help
-
-Order Selection (mutually exclusive):
-  --order-id ORDER_ID     Single order ID to download
-  --orders FILE           Path to file with order IDs (one per line, .txt format)
-  --orders-csv FILE       Path to CSV with order search results (uses 'Order #' column)
-  --resume FILE           Resume from checkpoint file (not yet implemented)
-  --bulk-orders           Search and download orders by date range
-
-Bulk Order Options:
-  --start-date DATE       Start date for bulk order search (YYYY-MM-DD)
-  --end-date DATE         End date for bulk order search (YYYY-MM-DD)
-  --customer-ids IDS      Comma-separated customer IDs (default: all Banner's stores)
-  --search-only           Only search and show summary, don't download orders
-
-Configuration:
-  --output DIR            Output directory (overrides OUTPUT_DIRECTORY env var)
-  --headless              Run browser in headless mode
-  --log-level LEVEL       Logging level: DEBUG, INFO, WARNING, ERROR
 ```
+
+**Order Selection (mutually exclusive):**
+- `--order-id ORDER_ID` - Single order ID to download
+- `--orders FILE` - Path to file with order IDs (one per line, .txt format)
+- `--orders-csv FILE` - Path to CSV with order search results (uses 'Order #' column)
+- `--billing-doc-id ID` - Single billing document ID to download
+- `--billing-docs-csv FILE` - Path to CSV with billing document search results (uses 'Billing Document #' column)
+- `--bulk-orders` - Search and download orders by date range
+
+**Bulk Order Options:**
+- `--start-date DATE` - Start date for bulk order search (YYYY-MM-DD)
+- `--end-date DATE` - End date for bulk order search (YYYY-MM-DD)
+- `--customer-ids IDS` - Comma-separated customer IDs (default: all Banner's stores)
+- `--search-only` - Only search and show summary, don't download orders
+
+**Configuration:**
+- `--output DIR` - Output directory (overrides OUTPUT_DIRECTORY env var)
+- `--headless` - Run browser in headless mode (default: true - always headless, flag kept for compatibility)
+- `--log-level LEVEL` - Logging level: DEBUG, INFO, WARNING, ERROR
+- `--update` - Re-download existing records (default: skip existing records)
+- `--max-consecutive-failures N` - Maximum consecutive failures before stopping (default: 3)
 
 ## Session Persistence
 
-**Important:** After the first successful login, your session is automatically saved to `hallmark_session.json`. Subsequent runs will **skip login/MFA entirely** and go straight to data extraction!
+**Important:** After the first successful login, your session is automatically saved to `sessions/hallmark_session.json`. Subsequent runs will **skip login/MFA entirely** and go straight to data extraction!
 
 ### How It Works
 
@@ -173,7 +191,7 @@ Configuration:
 python main.py --order-id 3076428648
 # → Browser opens
 # → You enter MFA code
-# → Session saved to hallmark_session.json
+# → Session saved to sessions/hallmark_session.json
 # → Order extracted
 ```
 
@@ -189,13 +207,13 @@ python main.py --orders my_orders.txt
 
 - Session typically valid for several hours
 - Automatically falls back to full login if session expires
-- Saved in `hallmark_session.json` (in .gitignore - never committed)
+- Saved in `sessions/hallmark_session.json` (in .gitignore - never committed)
 
 ### Clear Saved Session
 
 If you need to force a fresh login:
 ```bash
-rm hallmark_session.json
+rm sessions/hallmark_session.json
 ```
 
 ## Project Structure
@@ -209,24 +227,28 @@ hcscraper/
     api/               # API client + Aura request builders
       client.py
       request_builder.py
-    extractors/        # Order extraction logic
+    extractors/        # Data extraction logic
+      base_extractor.py
       order_extractor.py
       bulk_order_extractor.py
-      billing_document_extractor.py  # Not used in main app
-      delivery_extractor.py          # Not used in main app
+      billing_document_extractor.py
+      delivery_extractor.py
     storage/           # JSON writer
       json_writer.py
-    utils/             # Config + logging
+    utils/             # Config + logging + date parsing
       config.py
       logger.py
-  tests/               # Unit tests
+      date_parser.py
   data/                # Output directory (gitignored)
+  logs/                # Component-based log files (gitignored)
+  sessions/            # Session persistence (gitignored)
+  search_results/      # CSV input files
   main.py              # Main entry point
   test_auth.py         # Authentication test
-  .env                 # Configuration (gitignored)
-  schema.sql           # PostgreSQL schema
   import_to_postgres.py  # Database import script
   create_stores_table.py  # Store mapping setup script
+  schema.sql           # PostgreSQL schema
+  .env                 # Configuration (gitignored)
 ```
 
 ## Output Files
@@ -236,12 +258,12 @@ Extracted data is saved in a hierarchical directory structure organized by year,
 ```
 data/
   2025/
-    01/
+    09/
+      store_1403/
+        order_3068921632.json
+        billing_5055177281.json
       store_9/
-        order_8823.json
-        order_8824.json
-      store_17/
-        order_8825.json
+        order_3076428648.json
 ```
 
 ### File Structure
@@ -249,7 +271,10 @@ data/
 **Orders:**
 - `order_{ORDER_ID}.json` - Complete order data including header and line items
 
-The JSON files contain all order data including line items in a flattened, structured format.
+**Billing Documents:**
+- `billing_{BILLING_DOCUMENT_ID}.json` - Complete billing document data
+
+The JSON files contain all data including line items in a flattened, structured format.
 
 ### Directory Organization
 
@@ -260,7 +285,7 @@ The system extracts the year/month from the order date and uses the canonical st
 
 ### JSON Format
 
-JSON files contain the complete order data in a flattened structure:
+JSON files contain the complete data in a flattened structure:
 
 ```json
 {
@@ -284,6 +309,18 @@ JSON files contain the complete order data in a flattened structure:
 
 All field names use snake_case, and the structure is flattened (no nested wrappers). The complete original data is preserved for reference when imported into PostgreSQL.
 
+## Logging
+
+The application uses component-based logging with separate log files for different components:
+
+- `logs/auth.log` - Authentication operations
+- `logs/extractors.log` - Data extraction operations
+- `logs/api.log` - API requests and responses
+- `logs/storage.log` - File storage operations
+- `logs/main.log` - Main application flow
+
+Console output shows WARNING level and above by default (or DEBUG if `--log-level DEBUG` is used), while all log files contain detailed information at the configured log level.
+
 ## PostgreSQL Import
 
 The docker-compose.yml includes a PostgreSQL service that automatically starts with the application.
@@ -306,11 +343,11 @@ docker compose run --rm hcscraper python import_to_postgres.py
 The import script will:
 - Connect to the PostgreSQL service automatically (using default DATABASE_URL)
 - Create database tables if they don't exist (`orders`, `order_items`, `order_deliveries`, `order_billing_documents`, `stores`)
-- Find all `order_*.json` files in the data directory
-- Extract order headers and line items from the flattened JSON structure
+- Find all `order_*.json` and `billing_*.json` files in the data directory
+- Extract entity headers and line items from the flattened JSON structure
 - Insert data into PostgreSQL with proper data types
 - Store the full raw JSON in JSONB columns for reference
-- Handle duplicates (updates existing orders if re-imported)
+- Handle duplicates (updates existing records if re-imported)
 - Use canonical store names from the `stores` table
 
 **Setting Up Store Mapping:**
@@ -424,19 +461,32 @@ The webhook should return:
 {"code": "123456"}
 ```
 
+## Skip Existing Records
+
+By default, the system **skips records that have already been extracted** to save time and resources. This prevents:
+- Wasting time re-downloading existing data
+- Wasting API resources and rate limits
+- Potential data loss if re-extraction fails
+
+**To re-download existing records**, use the `--update` flag:
+```bash
+python main.py --orders-csv orders.csv --update
+```
+
 ## Troubleshooting
 
 ### Authentication Issues
 
 1. **MFA timeout**: Increase timeout in webhook handler or use manual method
-2. **Token extraction fails**: Try running in non-headless mode to debug
-3. **Selectors not found**: Hallmark may have updated their UI - check selector definitions in `authenticator.py`
+2. **Token extraction fails**: Check `logs/auth.log` for detailed error information
+3. **Session expired**: Delete `sessions/hallmark_session.json` to force fresh login
 
 ### API Issues
 
 1. **401/403 errors**: Session token expired - re-authenticate
 2. **429 rate limiting**: Increase `RATE_LIMIT_DETAIL_SECONDS` or `RATE_LIMIT_SEARCH_SECONDS`
 3. **Timeout errors**: Check network connection and increase `MAX_RETRIES`
+4. **Empty responses**: Check authentication - see `logs/auth.log` for token extraction details
 
 ### Debug Mode
 
@@ -445,12 +495,14 @@ Enable detailed logging:
 python main.py --order-id 3076428648 --log-level DEBUG
 ```
 
+Check component-specific log files in `logs/` directory for detailed information.
+
 ## Security Notes
 
 - **NEVER** commit `.env` file (it's in `.gitignore`)
 - **NEVER** hardcode credentials in code
 - Store output data securely (contains business-sensitive information)
-- Review `.gitignore` to ensure data files are excluded
+- Review `.gitignore` to ensure data files, logs, and sessions are excluded
 
 ## Docker Usage
 
@@ -465,7 +517,7 @@ The application can be run in a Docker container with files accessible on the ho
 
 Before the first run, create the required directories:
 ```bash
-mkdir -p data sessions
+mkdir -p data sessions logs search_results
 ```
 
 This ensures Docker mounts these as directories (not files) and the application can write to them.
@@ -488,7 +540,7 @@ The container is configured for interactive use, allowing you to:
 - See real-time progress messages and logs
 - Monitor extraction progress
 
-**Single order (interactive):**
+**Single order:**
 ```bash
 docker compose run --rm -it hcscraper python main.py --order-id 3076428648
 ```
@@ -503,9 +555,15 @@ docker compose run --rm -it hcscraper python main.py --orders orders.txt
 docker compose run --rm -it hcscraper python main.py --bulk-orders --start-date 2025-01-01 --end-date 2025-01-31
 ```
 
-**Note:** The `-it` flags ensure interactive mode with a TTY, allowing you to:
-- Enter MFA codes when prompted
-- See all progress messages and logs in real-time
+**Billing documents from CSV:**
+```bash
+docker compose run --rm -it hcscraper python main.py --billing-docs-csv search_results/billing_documents_202509.csv
+```
+
+**Note:** 
+- The `-it` flags are needed for interactive MFA code input (when using manual MFA method)
+- Browser always runs in headless mode by default
+- You can see all progress messages and logs in real-time
 - Interrupt the process with Ctrl+C if needed
 
 ### Volume Mounts
@@ -513,6 +571,7 @@ docker compose run --rm -it hcscraper python main.py --bulk-orders --start-date 
 The `docker-compose.yml` file mounts the following directories to the host:
 - `./data` → `/app/data` - Downloaded data files
 - `./sessions` → `/app/sessions` - Session persistence (contains `hallmark_session.json`)
+- `./logs` → `/app/logs` - Component-based log files
 - `./search_results` → `/app/search_results:ro` - CSV input files (read-only)
 
 Files downloaded in the container will be immediately accessible in the `./data` directory on your host machine.
@@ -527,47 +586,43 @@ docker build -t hcscraper .
 docker run --rm -it \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/sessions:/app/sessions" \
+  -v "$(pwd)/logs:/app/logs" \
   -v "$(pwd)/.env:/app/.env:ro" \
   hcscraper python main.py --order-id 3076428648
 ```
 
-**Note:** Use `-it` flags for interactive mode (MFA input and progress visibility). For non-interactive runs with webhook MFA, omit `-it`:
+**Note:** 
+- Use `-it` flags for interactive MFA code input (when using manual MFA method)
+- Browser always runs in headless mode by default
+- For webhook MFA, you can omit `-it` since no manual input is needed:
 ```bash
 # Non-interactive (webhook MFA only)
 docker run --rm \
   -v "$(pwd)/data:/app/data" \
   -v "$(pwd)/sessions:/app/sessions" \
+  -v "$(pwd)/logs:/app/logs" \
   -v "$(pwd)/.env:/app/.env:ro" \
-  hcscraper python main.py --headless --order-id 3076428648
+  hcscraper python main.py --order-id 3076428648
 ```
 
-### Interactive Mode (for MFA input and progress monitoring)
+### Interactive Mode (for MFA input)
 
-All commands are interactive by default when using `docker compose run -it`. This allows you to:
-- Enter MFA codes when prompted
-- See real-time progress updates and logs
-- Monitor extraction progress meters
-
-**Interactive mode with manual MFA:**
+When using manual MFA method, use `-it` flags to enter MFA codes:
 ```bash
+# Manual MFA (interactive)
 docker compose run --rm -it hcscraper python main.py --order-id 3076428648
 ```
 
-**Interactive mode with headless browser (still shows progress):**
+**For webhook MFA (non-interactive, no manual input needed):**
 ```bash
-docker compose run --rm -it hcscraper python main.py --headless --order-id 3076428648
-```
-
-**For webhook MFA (non-interactive, but still shows progress):**
-```bash
-docker compose run --rm hcscraper python main.py --headless --order-id 3076428648
+docker compose run --rm hcscraper python main.py --order-id 3076428648
 ```
 
 **Note:** The `-it` flags enable:
 - `-i` (--interactive): Keeps STDIN open for input (needed for MFA codes)
 - `-t` (--tty): Allocates a pseudo-TTY for proper output formatting and color
 
-Without `-it`, you'll still see output but won't be able to enter MFA codes interactively.
+Without `-it`, you'll still see output but won't be able to enter MFA codes interactively. Browser always runs in headless mode by default.
 
 ## Development
 
@@ -581,7 +636,7 @@ Install additional dependencies:
 uv sync
 ```
 
-Code structure follows the patterns documented in `.cursorrules`, `CLAUDE.md`, and `hallmark_automation_spec.md`.
+Code structure follows the patterns documented in `.cursorrules`.
 
 ## License
 
